@@ -4,6 +4,34 @@ Tracks every commit, patch, and change applied to the GameHub 5.3.5 ReVanced APK
 
 ---
 
+### [feat] — PC-accurate XInput rumble with per-container settings (2026-04-17)
+**Commit:** pending  |  **Tag:** pending
+**Based on:** GameNative PR #1214 (Fix-Vibration, TideGear)
+#### What changed
+- New `BhVibrationController` singleton — dispatch engine for XInput rumble frames arriving via `GamepadServerManager.onRumble(III)V`
+- Dispatch modes: **Off** / **Controller** / **Device** / **Both**
+- Controller dispatch: `CombinedVibration.startParallel()` with deterministic motor-id assignment (sorted ascending = low/heavy motor first), per-motor `hasAmplitudeControl()` checks, `VibrationAttributes`, amplitude floor of 1 so low XInput values aren't quantised to silence
+- Device dispatch: per-slot phone rumble aggregated as MAX across all 4 XInput slots, blended `low*0.80 + high*0.33`, haptic curve `pow(norm, 0.6)` to keep weak rumbles perceptible
+- Keepalive refresh every 60 ms so active rumble doesn't stutter while a motion continues past the 2-second `createOneShot` expiry; stale slot values (>1.5 s with no update) are cleaned up
+- User-facing intensity slider (0–100 %) scales both paths
+- Per-container settings: mode/intensity are stored by gameId (with global fallback). Active container resolved lazily via `ActivityThread` reflection, so no smali patch to `WineActivity.onCreate` is needed
+- Settings UI: new `BhVibrationSettingsActivity` (Spinner + SeekBar, Java-built, no XML layout), wired into the sidebar settings list as `contentType=0x65` following the Grant Root Access (0x64) pattern
+#### Files touched
+- `extension/BhVibrationController.java` (new) — dispatch engine
+- `extension/BhVibrationSettingsActivity.java` (new) — settings screen
+- `patches/AndroidManifest.xml` — register `BhVibrationSettingsActivity` with translucent theme
+- `.github/workflows/build.yml` — 5 Python anchor patches:
+  1. `GamepadServerManager.onRumble(III)V` — entry hook → `BhVibrationController.onRumble`
+  2. `GamepadDevice$Physical.h(II)V` — controller dispatch delegate → `BhVibrationController.dispatchToController`
+  3. `SettingBtnHolder.w()` — click handler for 0x65 → `BhVibrationController.launchSettings`
+  4. `SettingItemEntity.getContentName()` — returns "PC Vibration Settings" for 0x65
+  5. `SettingItemViewModel.k()` — inserts 0x65 entry below Grant Root Access
+#### Known follow-ups
+- Strings are English-only (hardcoded inline, matching the Grant Root pattern). Japanese localization requires refactoring the inline strings to `res/values/strings.xml` + `res/values-ja/strings.xml`.
+- No automated test path — verification is manual (launch a Wine game, trigger rumble, cycle modes).
+
+---
+
 ### [stable] — v3.1.0 — Full-screen detail pages, update checkers, DLC, cloud saves (2026-04-14)
 **Commit:** `d29f5fb4c`  |  **Tag:** v3.1.0
 **CI:** ✅ run 24422975293

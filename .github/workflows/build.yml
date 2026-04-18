@@ -230,6 +230,185 @@ jobs:
           print("Settings Import/Export patch applied.")
           PYEOF
 
+      - name: Apply BhVibration smali patches
+        run: |
+          python3 << 'PYEOF'
+          import sys
+
+          def patch(path, old, new, label):
+              try:
+                  content = open(path, encoding='utf-8').read()
+              except UnicodeDecodeError:
+                  content = open(path, encoding='latin-1').read()
+              if old not in content:
+                  print(f"ERROR: anchor not found in {path} for: {label}")
+                  sys.exit(1)
+              open(path, 'w', encoding='utf-8').write(content.replace(old, new, 1))
+              print(f"OK: {label}")
+
+          # Patch 1: GamepadServerManager.onRumble(III)V — entry hook
+          # Calls BhVibrationController.onRumble(slot, low, high). If it returns true,
+          # the controller fallthrough is skipped (Off / Device-only modes).
+          patch(
+              'apktool_out_base/smali_classes10/com/winemu/core/gamepad/GamepadServerManager.smali',
+              '.method private final onRumble(III)V\n'
+              '    .locals 2\n'
+              '    .annotation build Landroidx/annotation/Keep;\n'
+              '    .end annotation\n'
+              '\n'
+              '    .line 1\n'
+              '    if-ltz p1, :cond_0\n',
+              '.method private final onRumble(III)V\n'
+              '    .locals 2\n'
+              '    .annotation build Landroidx/annotation/Keep;\n'
+              '    .end annotation\n'
+              '\n'
+              '    # BH: PC-accurate rumble dispatcher hook\n'
+              '    invoke-static {p1, p2, p3}, Lcom/xj/winemu/vibration/BhVibrationController;->onRumble(III)Z\n'
+              '\n'
+              '    move-result v0\n'
+              '\n'
+              '    if-eqz v0, :bh_rumble_fallthrough\n'
+              '\n'
+              '    return-void\n'
+              '\n'
+              '    :bh_rumble_fallthrough\n'
+              '\n'
+              '    .line 1\n'
+              '    if-ltz p1, :cond_0\n',
+              'GamepadServerManager.onRumble(III)V: inject BhVibrationController entry hook'
+          )
+
+          # Patch 2: GamepadDevice$Physical.h(II)V — controller dispatch delegate
+          # Reads deviceId from field d:I and hands (deviceId, low, high) to the extension.
+          # If it returns true (mode=Controller/Both handled it, or mode=Off/Device silenced it),
+          # skip the stock per-vibrator fallback entirely.
+          patch(
+              'apktool_out_base/smali_classes5/com/winemu/core/gamepad/GamepadDevice$Physical.smali',
+              '.method public h(II)V\n'
+              '    .locals 3\n'
+              '\n'
+              '    .line 1\n'
+              '    const v0, 0xffff\n',
+              '.method public h(II)V\n'
+              '    .locals 3\n'
+              '\n'
+              '    # BH: PC-accurate controller dispatch\n'
+              '    iget v0, p0, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->d:I\n'
+              '\n'
+              '    invoke-static {v0, p1, p2}, Lcom/xj/winemu/vibration/BhVibrationController;->dispatchToController(III)Z\n'
+              '\n'
+              '    move-result v0\n'
+              '\n'
+              '    if-eqz v0, :bh_phys_fallthrough\n'
+              '\n'
+              '    return-void\n'
+              '\n'
+              '    :bh_phys_fallthrough\n'
+              '\n'
+              '    .line 1\n'
+              '    const v0, 0xffff\n',
+              'GamepadDevice$Physical.h(II)V: inject BhVibrationController.dispatchToController'
+          )
+
+          # Patch 3: SettingBtnHolder.w() — handle click for contentType=0x65 (PC Vibration Settings)
+          # Applied AFTER the Grant Root Access patch that inserted :bh_skip_root_grant.
+          # We insert right after :bh_skip_root_grant so both branches coexist.
+          patch(
+              'apktool_out_base/smali_classes6/com/xj/landscape/launcher/ui/setting/holder/SettingBtnHolder.smali',
+              '    :bh_skip_root_grant\n'
+              '\n'
+              '    .line 15\n'
+              '    sget-object p1, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
+              '->Companion:Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity$Companion;\n',
+              '    :bh_skip_root_grant\n'
+              '\n'
+              '    # BH: PC Vibration Settings click handler (contentType=0x65)\n'
+              '    const/16 v0, 0x65\n'
+              '\n'
+              '    if-ne p0, v0, :bh_skip_vib_settings\n'
+              '\n'
+              '    invoke-virtual {p2}, Landroid/view/View;->getContext()Landroid/content/Context;\n'
+              '\n'
+              '    move-result-object v0\n'
+              '\n'
+              '    invoke-static {v0}, Lcom/xj/winemu/vibration/BhVibrationController;->launchSettings(Landroid/content/Context;)V\n'
+              '\n'
+              '    sget-object v0, Lkotlin/Unit;->a:Lkotlin/Unit;\n'
+              '\n'
+              '    return-object v0\n'
+              '\n'
+              '    :bh_skip_vib_settings\n'
+              '\n'
+              '    .line 15\n'
+              '    sget-object p1, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
+              '->Companion:Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity$Companion;\n',
+              'SettingBtnHolder.w(): PC Vibration Settings click handler (contentType=0x65)'
+          )
+
+          # Patch 4: SettingItemEntity.getContentName() — return localized label for 0x65.
+          # Inserted before the :bh_skip_grant_name fallthrough so 0x65 resolves before the default lookup.
+          patch(
+              'apktool_out_base/smali_classes13/com/xj/landscape/launcher/data/model/entity/SettingItemEntity.smali',
+              '    :bh_skip_grant_name\n'
+              '    invoke-static {p0}, Lapp/revanced/extension/gamehub/prefs/GameHubPrefs;->getCustomSettingName(I)Ljava/lang/String;\n',
+              '    :bh_skip_grant_name\n'
+              '    # BH: PC Vibration Settings (contentType=0x65)\n'
+              '    const/16 v0, 0x65\n'
+              '\n'
+              '    if-ne p0, v0, :bh_skip_vib_name\n'
+              '\n'
+              '    const-string p0, "PC Vibration Settings"\n'
+              '\n'
+              '    return-object p0\n'
+              '\n'
+              '    :bh_skip_vib_name\n'
+              '    invoke-static {p0}, Lapp/revanced/extension/gamehub/prefs/GameHubPrefs;->getCustomSettingName(I)Ljava/lang/String;\n',
+              'SettingItemEntity.getContentName(): return "PC Vibration Settings" for 0x65'
+          )
+
+          # Patch 5: SettingItemViewModel.k() — add PC Vibration Settings TYPE_BTN below Grant Root Access
+          # Applied AFTER Grant Root added its 0x64 block; we append a 0x65 block right after.
+          patch(
+              'apktool_out_base/smali_classes3/com/xj/landscape/launcher/vm/SettingItemViewModel.smali',
+              '    # BannerHub: Grant Root Access button (contentType=0x64) below Clear Cache\n'
+              '    new-instance v0, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;\n'
+              '\n'
+              '    const/16 v2, 0x64\n'
+              '\n'
+              '    invoke-direct/range {v0 .. v6}, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
+              '-><init>(IILandroid/util/SparseArray;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
+              '\n'
+              '    invoke-interface {p0, v0}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
+              '\n'
+              '    .line 79\n',
+              '    # BannerHub: Grant Root Access button (contentType=0x64) below Clear Cache\n'
+              '    new-instance v0, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;\n'
+              '\n'
+              '    const/16 v2, 0x64\n'
+              '\n'
+              '    invoke-direct/range {v0 .. v6}, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
+              '-><init>(IILandroid/util/SparseArray;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
+              '\n'
+              '    invoke-interface {p0, v0}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
+              '\n'
+              '    # BH: PC Vibration Settings button (contentType=0x65)\n'
+              '    new-instance v0, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;\n'
+              '\n'
+              '    const/16 v2, 0x65\n'
+              '\n'
+              '    invoke-direct/range {v0 .. v6}, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
+              '-><init>(IILandroid/util/SparseArray;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
+              '\n'
+              '    invoke-interface {p0, v0}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
+              '\n'
+              '    .line 79\n',
+              'SettingItemViewModel.k(): add PC Vibration Settings TYPE_BTN after Grant Root Access'
+          )
+
+          print("\nBhVibration smali patches applied successfully.")
+          PYEOF
+
       - name: Upload patched source
         uses: actions/upload-artifact@v4
         with:
