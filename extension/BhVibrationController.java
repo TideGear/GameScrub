@@ -15,8 +15,6 @@ import android.os.VibratorManager;
 import android.util.Log;
 import android.view.InputDevice;
 
-import androidx.annotation.Keep;
-
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
@@ -40,7 +38,6 @@ import java.util.Map;
  *   2 = Device      — dispatch aggregated rumble to phone's built-in vibrator
  *   3 = Both        — dispatch to both controller and device
  */
-@Keep
 public final class BhVibrationController {
 
     private static final String TAG = "BhVibration";
@@ -233,7 +230,6 @@ public final class BhVibrationController {
      * Entry point invoked from the sidebar settings button (contentType=0x65).
      * Kept as a single static so the smali click handler can stay tiny.
      */
-    @Keep
     public static void launchSettings(Context ctx) {
         if (ctx == null) return;
         try {
@@ -250,7 +246,6 @@ public final class BhVibrationController {
     //   Return true  → caller short-circuits (device-only or off).
     //   Return false → caller falls through to stock controller dispatch.
     // ─────────────────────────────────────────────────────────────────────────
-    @Keep
     public static boolean onRumble(int slot, int low, int high) {
         try {
             return getInstance().handleRumble(slot, low, high);
@@ -265,7 +260,6 @@ public final class BhVibrationController {
     //   Return true  → caller short-circuits (controller handled, or mode excludes it).
     //   Return false → caller falls through to stock per-vibrator dispatch.
     // ─────────────────────────────────────────────────────────────────────────
-    @Keep
     public static boolean dispatchToController(int deviceId, int lowRaw, int highRaw) {
         try {
             return getInstance().handleControllerDispatch(deviceId, lowRaw, highRaw);
