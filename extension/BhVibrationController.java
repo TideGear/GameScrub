@@ -101,6 +101,13 @@ public final class BhVibrationController {
     private final int[] slotHigh = new int[MAX_SLOTS];
     private final long[] slotStamp = new long[MAX_SLOTS];
 
+    // Diagnostic-only state: tracks the LAST guest frame regardless of mode so
+    // the auto-expiry trace works in any mode and isn't perturbed by MODE_OFF
+    // skipping the dispatch-state update. See logGuestTransition.
+    private final int[] diagPrevLow = new int[MAX_SLOTS];
+    private final int[] diagPrevHigh = new int[MAX_SLOTS];
+    private final long[] diagPrevWhen = new long[MAX_SLOTS];
+
     // Controller keepalive state: per deviceId, last dispatched (low, high, when).
     private final Map<Integer, long[]> controllerKeepalive = new HashMap<>();
 
@@ -278,6 +285,12 @@ public final class BhVibrationController {
         ensureContext();
         maybeResolveContainerFromActivityStack();
 
+        // Diagnostic: log every state change from the guest with a timestamp delta.
+        // Flags non-zero -> (0,0) arrivals around 1 s as suspected SDL auto-expiry,
+        // which is the bug GameNative PR #1214's evshim keepalive fixes. Read prev
+        // state BEFORE the OFF early-return so the trace stays accurate across modes.
+        logGuestTransition(slot, low & 0xFFFF, high & 0xFFFF);
+
         int mode = cachedMode;
         if (mode == MODE_OFF) return true; // swallow everything
 
@@ -321,6 +334,44 @@ public final class BhVibrationController {
         dispatchControllerInternal(dev, low, high, /*log*/ true);
         recordKeepalive(deviceId, low, high);
         return true;
+    }
+
+    /**
+     * Diagnostic logger for guest-side rumble events arriving via
+     * GamepadServerManager.onRumble. Logs only meaningful state transitions
+     * (skips repeated same-value frames). Tags non-zero -> (0,0) arrivals in
+     * the 900-1200 ms window as suspected SDL auto-expiry — the trigger for
+     * deciding whether to port GameNative PR #1214's evshim keepalive.
+     *
+     * Reads previous state from slotLow/slotHigh/slotStamp BEFORE handleRumble
+     * overwrites them, so each log line shows the actual delta from the last
+     * frame. Filter logcat with `BhVibration` and grep "DIAG ".
+     */
+    private void logGuestTransition(int slot, int newLow, int newHigh) {
+        int prevLow = diagPrevLow[slot];
+        int prevHigh = diagPrevHigh[slot];
+        long prevWhen = diagPrevWhen[slot];
+        long now = SystemClock.uptimeMillis();
+
+        // Always update the diagnostic state, even on idle frames, so the next
+        // transition's gap measures from the most recent non-update event too.
+        diagPrevLow[slot] = newLow;
+        diagPrevHigh[slot] = newHigh;
+        diagPrevWhen[slot] = now;
+
+        if (prevLow == newLow && prevHigh == newHigh) return; // idle frame, no log
+
+        long gap = (prevWhen > 0) ? (now - prevWhen) : -1L;
+        boolean wasNonZero = (prevLow | prevHigh) != 0;
+        boolean isZero = (newLow | newHigh) == 0;
+        String tag = "";
+        if (wasNonZero && isZero && gap >= 900L && gap <= 1200L) {
+            tag = "  [SDL_AUTO_EXPIRY?]";
+        }
+        Log.i(TAG, "DIAG slot=" + slot
+                + "  " + prevLow + "," + prevHigh
+                + " -> " + newLow + "," + newHigh
+                + "  gap=" + gap + "ms" + tag);
     }
 
     /**

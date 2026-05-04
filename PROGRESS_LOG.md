@@ -4,6 +4,23 @@ Tracks every commit, patch, and change applied to the GameHub 5.3.5 ReVanced APK
 
 ---
 
+### [diag] — SDL auto-expiry trace in BhVibrationController (2026-05-04)
+**Commit:** pending
+#### Why
+Investigating whether GameNative PR #1214's `evshim`-based SDL keepalive applies to BannerHub. Architectural review of `libwinemu.so` (Tencent's `winemu::GamepadServer`) found GameHub's gamepad bridge is an AF_UNIX IPC socket named `winemu` carrying `MessageHeader`-framed messages — *not* the `gamepad.mem` shared-memory file PR #1214's evshim writes to. So evshim's `pwrite(rumble_fd, vals, 4, 32)` half is dead code on this base; the only half worth porting is the SDL `JoystickRumble` keepalive — but only if the SDL ~1 s auto-expiry actually manifests here. The full smali corpus has zero references to SDL/VirtualJoystick, suggesting the imagefs's guest-side IPC client is custom and may not introduce the auto-expiry at all.
+#### What changed
+- `BhVibrationController.handleRumble`: log every guest-side state transition with a per-slot gap-from-last-frame in milliseconds. Tags `non-zero -> (0,0)` arrivals where gap is 900-1200 ms with `[SDL_AUTO_EXPIRY?]` so the bug is grep-able in logcat.
+- Diagnostic uses its own `diagPrev{Low,High,When}` arrays so MODE_OFF (which skips the dispatch-state update) doesn't corrupt the trace.
+#### How to read the trace
+1. Install the build, set Mode to Controller (any non-Off mode works for diagnostic purposes), launch a Wine game with sustained rumble.
+2. `adb logcat -s BhVibration | grep "DIAG "` while the game runs.
+3. If `[SDL_AUTO_EXPIRY?]` lines cluster at ~1000 ms during sustained rumble, the bug exists here too and an evshim-style keepalive port may help — but the LD_PRELOAD target inside the imagefs is unknown without further reverse engineering.
+4. If `non-zero -> (0,0)` arrivals show only at real game-event boundaries (gaps not clustering at ~1000 ms), the bug doesn't exist on this bridge and no native shim is needed.
+#### Files touched
+- `extension/BhVibrationController.java` — added `logGuestTransition` + diag arrays; called from `handleRumble` before the MODE_OFF early-return
+
+---
+
 ### [stable] — v3.5.0 — External storage, system bars, uninstall UX, storage badge (2026-04-27)
 **Tag:** v3.5.0  |  **CI:** run 25024033767 ✅  |  **Release:** https://github.com/The412Banner/BannerHub/releases/tag/v3.5.0
 #### What shipped (all pre1–pre12 over v3.4.1)
