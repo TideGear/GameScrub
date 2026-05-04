@@ -737,7 +737,7 @@
     if-ne p0, v0, :cond_0
 
     .line 230
-    const-string p0, "SD Card Storage"
+    const-string p0, "Save Store Games to External Storage (SD Card)"
 
     return-object p0
 

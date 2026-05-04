@@ -2,8 +2,10 @@
 
 > **Credit:** This document and the BannerHub Epic Games Store integration would not exist without the hard work of [The GameNative Team](https://github.com/utkarshdalal/GameNative). All API research, authentication flow design, manifest format documentation, CDN selection logic, and download pipeline architecture documented here is derived from their open-source work. Thank you.
 
+> **Also ported to:** The Epic integration documented here was also ported to the [Star Bionic project](https://github.com/jacojayy/star) beginning April 14, 2026.
+
 **Source:** https://github.com/utkarshdalal/GameNative
-**Generated:** 2026-03-29
+**Generated:** 2026-04-16 (updated)
 **Purpose:** Porting reference for BannerHub Android app
 
 ---
@@ -25,6 +27,11 @@
 14. [Helper Utilities](#14-helper-utilities)
 15. [Notable Commits and PRs](#15-notable-commits-and-prs)
 16. [BannerHub Port Notes](#16-bannerhub-port-notes)
+17. [BannerHub: Full-Screen Game Detail Activity](#17-bannerhub-full-screen-game-detail-activity)
+18. [BannerHub: Free Games Screen](#18-bannerhub-free-games-screen)
+19. [BannerHub: Cloud Saves Implementation](#19-bannerhub-cloud-saves-implementation)
+20. [BannerHub: Update Checker](#20-bannerhub-update-checker)
+21. [BannerHub: DLC Management](#21-bannerhub-dlc-management)
 
 ---
 
@@ -1063,3 +1070,288 @@ Use these to test parser without hitting live API.
 - `binary-control-file.manifest` + `.expected.json` — binary manifest parse test
 - `test-manifest.json` + `.expected.json` — JSON manifest parse test
 - `test-v3-manifest.json` + `.expected.json` — v3 binary manifest parse test
+
+---
+
+## 17. BannerHub: Full-Screen Game Detail Activity
+
+File: `extension/EpicGameDetailActivity.java`
+
+Launched via `startActivityForResult` from `EpicGamesActivity`.
+
+### Intent extras
+
+| Extra | Type | Description |
+|---|---|---|
+| `app_name` | String | Legendary app name (UUID or slug) |
+| `catalog_item_id` | String | Epic catalog UUID |
+| `namespace` | String | Epic namespace |
+| `title` | String | Game display name |
+| `art_cover` | String | `DieselGameBoxTall` cover art URL |
+| `developer` | String | Developer name |
+| `description` | String | Short description (may contain HTML) |
+
+### Layout sections
+
+1. **GAME INFO** — developer, app name (slug), release date, install size (async), description
+   (HTML-stripped via `Html.fromHtml()`, truncated to 400 chars)
+2. **ACTIONS** — exe path display, progress bar + label, Launch / Install / Cancel / Set .exe /
+   Uninstall buttons; state driven by `epic_installed_{appName}` and `epic_exe_{appName}` prefs
+3. **UPDATES** — stored version label, Check for Updates / Update Now buttons; see §20
+4. **DLC** — see §21
+5. **CLOUD SAVES** — folder path, Browse / Upload / Download buttons; see §19
+
+### HTML stripping
+
+```java
+String plain = Html.fromHtml(description, Html.FROM_HTML_MODE_COMPACT).toString().trim();
+String desc = plain.length() > 400 ? plain.substring(0, 400) + "…" : plain;
+```
+
+### Install size
+
+Fetched asynchronously after activity opens:
+1. Call `EpicApiClient.getManifestApiJson(token, namespace, catalogItemId, appName)` 
+2. Parse `totalDownloadSize` from the manifest metadata response
+3. Display formatted as human-readable bytes (KB/MB/GB)
+
+---
+
+## 18. BannerHub: Free Games Screen
+
+File: `extension/EpicFreeGamesActivity.java`
+
+Dedicated full-screen Activity accessible from `EpicMainActivity`. **No authentication required.**
+
+### API call
+
+```
+GET https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions
+  ?locale=en-US&country=US&allowCountries=US
+```
+
+No `Authorization` header needed. Public endpoint.
+
+### Response structure
+
+```json
+{
+  "data": {
+    "Catalog": {
+      "searchStore": {
+        "elements": [
+          {
+            "title": "Game Title",
+            "description": "...",
+            "productSlug": "game-slug",
+            "keyImages": [
+              { "type": "DieselGameBoxTall", "url": "https://..." }
+            ],
+            "price": {
+              "totalPrice": { "discountPrice": 0, "originalPrice": 1499 }
+            },
+            "promotions": {
+              "promotionalOffers": [
+                {
+                  "promotionalOffers": [
+                    {
+                      "startDate": "2026-04-10T15:00:00.000Z",
+                      "endDate": "2026-04-17T15:00:00.000Z",
+                      "discountSetting": { "discountType": "PERCENTAGE", "discountPercentage": 0 }
+                    }
+                  ]
+                }
+              ],
+              "upcomingPromotionalOffers": [...]
+            }
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+### Classification logic
+
+A game is **FREE THIS WEEK** if:
+- `promotions.promotionalOffers` is non-empty AND
+- At least one nested offer has `discountPercentage == 0` (100% off)
+
+A game is **FREE NEXT WEEK** if:
+- `promotions.upcomingPromotionalOffers` is non-empty AND
+- At least one nested offer has `discountPercentage == 0`
+
+### UI
+
+Two sections with distinct headers:
+- **FREE THIS WEEK** (shown first, cards with blue border `#0D5CA8`)
+- **FREE NEXT WEEK** (shown below, cards with dimmer styling)
+
+Each card shows: cover art (`DieselGameBoxTall`), title, dates. Tapping opens:
+```
+https://store.epicgames.com/en-US/p/{productSlug}
+```
+in the system browser via `Intent(ACTION_VIEW, Uri.parse(...))`.
+
+### Color scheme
+
+```
+Root background:  #0D0D0D
+Header background: #0F1117
+Card background:  #0A1A2A
+Card border:      #0D5CA8
+Accent:           #0078F0
+```
+
+---
+
+## 19. BannerHub: Cloud Saves Implementation
+
+File: `extension/EpicCloudSaveManager.java`
+
+### API
+
+Base URL: `https://datastorage-public-service-liveegs.live.use1a.on.epicgames.com/api/v1/access/egstore/savesync/`
+
+| Method | URL | Auth | Purpose |
+|---|---|---|---|
+| GET | `/{accountId}/{appName}/` | Bearer token | List cloud files |
+| POST | `/{accountId}/{appName}/` | Bearer token | Request presigned write links |
+| PUT | `{writeLink}` | None (presigned) | Upload a file |
+| GET | `{readLink}` | None (presigned) | Download a file |
+
+### List response
+
+```json
+{
+  "files": {
+    "saves/save1.dat": {
+      "hash": "...",
+      "lastModified": "2026-04-01T12:00:00.000Z",
+      "readLink": "https://...",
+      "writeLink": null
+    }
+  }
+}
+```
+
+`lastModified` is an ISO 8601 string. BannerHub parses it with a manual string-split approach
+(avoids `SimpleDateFormat` locale issues):
+```java
+// Parsed from "2026-04-01T12:00:00.000Z" to epoch millis
+int year=s[0..3], month=s[5..6], day=s[8..9], hour=s[11..12], min=s[14..15], sec=s[17..18]
+Calendar.getInstance(UTC)...getTimeInMillis()
+```
+
+### Write link request (POST body)
+
+```json
+{ "files": ["saves/save1.dat", "saves/save2.dat"] }
+```
+
+Response: same structure as list, but with `writeLink` populated for each requested file.
+
+### Token handling
+
+Uses `EpicCredentialStore.getValidAccessToken(ctx)` which auto-refreshes the token if within
+5 minutes of expiry before making API calls. This was the critical fix for cloud save 403 errors —
+the original code did not refresh the token for cloud save calls specifically.
+
+### Upload logic (`uploadSaves`)
+
+1. Get valid token via `EpicCredentialStore.getValidAccessToken(ctx)`
+2. Load `accountId` from `EpicCredentialStore.load(ctx).accountId`
+3. List cloud files
+4. Compare each local file's `lastModified` vs cloud `lastModified` — collect files where local is newer
+5. POST to request write links for those files
+6. PUT each file's bytes to its presigned `writeLink` (no Authorization header)
+
+### Download logic (`downloadSaves`)
+
+1. List cloud files (GET)
+2. For each file with a non-null `readLink`: GET the presigned URL (no Authorization header), write to `localFolder/{name}`
+
+### Debug logging
+
+Both operations write timestamped entries to `/sdcard/bh_cloud_debug.txt` tagged `[EPIC]`.
+
+### UI integration (EpicGameDetailActivity)
+
+The "CLOUD SAVES" section contains:
+- Folder path display (stored as `epic_cloud_dir_{appName}` in `bh_epic_prefs`)
+- **Browse** button → launches `FolderPickerActivity`
+- **Upload** → `EpicCloudSaveManager.uploadSaves(ctx, appName, localFolder, callback)`
+- **Download** → `EpicCloudSaveManager.downloadSaves(ctx, appName, localFolder, callback)`
+- Status feedback via `Callback.onStatus()` / `onDone()` / `onError()`
+
+---
+
+## 20. BannerHub: Update Checker
+
+File: `extension/EpicGameDetailActivity.java` (`doCheckUpdate()`)
+
+### API call
+
+Reuses `EpicApiClient.getManifestApiJson(token, namespace, catalogItemId, appName)` which calls:
+
+```
+GET https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2
+  /platform/Windows/namespace/{namespace}/catalogItem/{catalogItemId}/app/{appName}/label/Live
+Authorization: Bearer {accessToken}
+User-Agent: Legendary/0.1.0 (GameNative)
+```
+
+### Version extraction
+
+From the response JSON, reads the `versionId` field of the first manifest element:
+```java
+latestVer = new JSONObject(manifestJson).optString("versionId", null);
+```
+
+Note: this is the `versionId` returned in the assets/v2 metadata — distinct from `buildVersion`
+inside the binary manifest itself. The fix (commit `20a9e6056`) corrected the field lookup
+from an incorrect path to this top-level `versionId`.
+
+### Storage and comparison
+
+```
+bh_epic_prefs key:  epic_manifest_version_{appName}  (String)
+```
+
+- No stored value: save as baseline, display "Up to date ✓"
+- Stored == latest: "Up to date ✓"
+- Stored != latest: "Update available!\nInstalled: {stored[0..12]}…  →  Latest: {latest[0..12]}…"
+  with "Update Now" button visible
+
+### UI guard
+
+Shows "Install the game first to check for updates." if `epic_installed_{appName}` is false.
+
+---
+
+## 21. BannerHub: DLC Management
+
+The DLC section appears in `EpicGameDetailActivity`. DLC detection uses the catalog API response:
+a game is DLC if the catalog item JSON contains a `"mainGameItem"` key.
+
+### DLC catalog query
+
+When the game detail screen is opened and the game has DLC, an additional catalog bulk-item call
+is made for each known DLC (DLCs found in the library sync where `isDLC=true` and
+`baseGameAppName == game.catalogId`):
+
+```
+GET https://catalog-public-service-prod06.ol.epicgames.com/catalog/api/shared/namespace
+  /{namespace}/bulk/items?id={catalogItemId}&includeDLCDetails=true&includeMainGameDetails=true&country=US
+Authorization: Bearer {accessToken}
+```
+
+This re-uses the same endpoint as the library sync catalog call.
+
+### DLC section display
+
+- Lists owned DLC titles for the base game
+- Shows each DLC's install state
+- "Download DLC" button triggers install of the DLC alongside the base game (DLCs are downloaded
+  into the same `installPath` directory)

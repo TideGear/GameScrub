@@ -2,8 +2,10 @@
 
 > **Credit:** This document and the BannerHub GOG Games integration would not exist without the hard work of [The GameNative Team](https://github.com/utkarshdalal/GameNative). All API research, authentication flow design, depot manifest format documentation, and download pipeline architecture documented here is derived from their open-source work. Thank you.
 
+> **Also ported to:** The GOG integration documented here was also ported to the [Star Bionic project](https://github.com/jacojayy/star) beginning April 14, 2026.
+
 Source repository: https://github.com/utkarshdalal/GameNative
-Report date: 2026-03-21
+Report date: 2026-04-16 (updated)
 
 ---
 
@@ -26,6 +28,11 @@ Report date: 2026-03-21
 15. [Installation Verification](#15-installation-verification)
 16. [Game Fixes (Per-Title Overrides)](#16-game-fixes-per-title-overrides)
 17. [BannerHub Integration Guide](#17-bannerhub-integration-guide)
+18. [BannerHub: Full-Screen Game Detail Activity](#18-bannerhub-full-screen-game-detail-activity)
+19. [BannerHub: GOG Ratings](#19-bannerhub-gog-ratings)
+20. [BannerHub: Update Checker](#20-bannerhub-update-checker)
+21. [BannerHub: Cloud Saves Implementation](#21-bannerhub-cloud-saves-implementation)
+22. [BannerHub: DLC Management](#22-bannerhub-dlc-management)
 
 ---
 
@@ -1283,3 +1290,233 @@ The WebView in `GogMainActivity` currently stores the session. The download feat
 That is 6 distinct API call patterns. The secure link and chunk downloads are the most
 performance-sensitive. Handle 401/403/404 on chunk downloads by re-calling `secure_link` and
 retrying — this is the most common failure mode.
+
+---
+
+## 18. BannerHub: Full-Screen Game Detail Activity
+
+File: `extension/GogGameDetailActivity.java`
+
+Launched via `startActivityForResult(intent, REQ_GAME_DETAIL=1001)` from `GogGamesActivity`.
+
+### Intent extras
+
+| Extra | Type | Description |
+|---|---|---|
+| `game_id` | String | GOG numeric product ID |
+| `title` | String | Game display name |
+| `image_url` | String | Cover art URL |
+| `description` | String | Short lead description (may contain HTML) |
+| `developer` | String | Developer name |
+| `category` | String | Genre/category string |
+| `generation` | int | Build generation (1 or 2); shown as badge |
+
+### Result codes
+
+- `RESULT_CANCELED` — no state change
+- `RESULT_REFRESH = 100` — install state changed (uninstall or exe override set); caller refreshes card
+
+### Layout sections
+
+1. **GAME INFO** — developer, generation badge (Gen 2 = blue `#0277BD`, Gen 1 = orange `#E65100`),
+   rating (see §19), install size (async), description (HTML-stripped, truncated to 400 chars)
+2. **ACTIONS** — exe path display, progress bar + label (during download), Launch / Install / Cancel /
+   Set .exe / Uninstall / Copy path buttons; state driven by `gog_installed_{gameId}` and
+   `gog_exe_{gameId}` prefs
+3. **UPDATES** — stored build label, Check for Updates button, Update Now button (hidden until
+   update detected); see §20
+4. **DLC** — see §22
+5. **CLOUD SAVES** — folder path display, Browse / Upload / Download buttons; see §21
+
+### HTML stripping
+
+Descriptions are processed with `Html.fromHtml(description, Html.FROM_HTML_MODE_COMPACT).toString().trim()`
+before display to remove any embedded HTML tags from the GOG API response.
+
+---
+
+## 19. BannerHub: GOG Ratings
+
+### Source
+
+The `rating` field is returned as part of the standard game metadata call:
+
+```
+GET https://api.gog.com/products/{gameId}?expand=downloads,description,screenshots
+```
+
+Response field: `rating` — integer 0–500 (500 = 5 stars, i.e. 100 per star).
+
+### Storage
+
+Stored in `bh_gog_prefs` as:
+```
+gog_rating_{gameId}  (int, -1 if absent)
+```
+
+Set during library sync in `GogGamesActivity` at the same time as release date and other metadata.
+
+### Display
+
+```java
+float stars = rating / 100f;   // e.g. 420 → 4.2 stars
+String ratingStr = rating == 0 ? "Not rated" : String.format("%.1f / 5.0", stars);
+```
+
+Displayed as an info row in the `GogGameDetailActivity` "GAME INFO" card.
+
+---
+
+## 20. BannerHub: Update Checker
+
+File: `extension/GogGameDetailActivity.java` (`doCheckUpdate()`)
+
+### API call
+
+```
+GET https://content-system.gog.com/products/{gameId}/os/windows/builds?generation=2
+Authorization: Bearer {accessToken}    (optional — works without auth for public builds)
+User-Agent: GOG Galaxy
+```
+
+### Response parsing
+
+```json
+{
+  "items": [
+    { "build_id": "abc123...", "os": "windows", "generation": 2, ... },
+    ...
+  ]
+}
+```
+
+Pick the first item where `os == "windows"` and use its `build_id` as the version identifier.
+
+### Version storage and comparison
+
+```
+bh_gog_prefs key:  gog_build_{gameId}  (String)
+```
+
+- If no stored value: store `build_id` as baseline, display "Up to date (build {first 12 chars}…)"
+- If stored == latest: display "Up to date ✓"
+- If stored != latest: display "Update available!\nInstalled: {stored[0..12]}…  →  Latest: {latest[0..12]}…" and show "Update Now" button
+
+Tapping "Update Now" triggers a re-download of the game (same flow as first install).
+
+### UI state guard
+
+The update section shows "Install the game first to check for updates." if `gog_installed_{gameId}`
+is false in prefs. The Check and Update buttons are not displayed in that state.
+
+---
+
+## 21. BannerHub: Cloud Saves Implementation
+
+File: `extension/GogCloudSaveManager.java`
+
+### API
+
+Base URL: `https://cloudstorage.gog.com/v1/`
+
+| Method | URL | Purpose |
+|---|---|---|
+| GET | `/v1/{userId}/{clientId}` | List cloud files (returns JSON array) |
+| GET | `/v1/{userId}/{clientId}/{filename}` | Download a single save file |
+| PUT | `/v1/{userId}/{clientId}/{filename}` | Upload a single save file |
+
+All requests use `Authorization: Bearer {token}` and `User-Agent: GOG Galaxy`.
+
+`clientId` for cloud storage is the **game's own client ID**, not the Galaxy app credentials.
+`userId` is the account user ID stored in `bh_gog_prefs` as `user_id`.
+
+### Game-Scoped Token
+
+GOG's cloud storage API requires a token issued to the game's own `client_id`/`client_secret`.
+The flow in `getGameScopedToken()`:
+
+1. Read `gog_client_secret_{gameId}` from `bh_gog_prefs` (set during `getOrFetchClientId()` in `GogDownloadManager`)
+2. Use the Galaxy app's stored `refresh_token` with the game's `client_id`/`client_secret`:
+   ```
+   GET https://auth.gog.com/token
+     ?client_id={gameClientId}
+     &client_secret={gameClientSecret}
+     &grant_type=refresh_token
+     &refresh_token={galaxyRefreshToken}
+   ```
+3. Use the resulting `access_token` for all cloud storage API calls
+4. If `clientSecret` is missing or the exchange fails: fall back to the Galaxy app token
+
+### Cloud file list response
+
+```json
+[
+  { "name": "savegame.dat", "last_modified": 1711234567 },
+  { "name": "settings.ini", "last_modified": 1711230000 }
+]
+```
+
+`last_modified` is in **seconds** — converted to ms by multiplying by 1000 unless already > 10^12
+(millisecond-scale value check).
+
+### Upload logic (`uploadSaves`)
+
+For each local file:
+- Compare `local.lastModified()` (ms) vs cloud `last_modified * 1000` (ms)
+- Skip if cloud version is same age or newer
+- PUT file bytes with `Content-Type: application/octet-stream`
+
+### Error handling
+
+HTTP 404 on list → treated as empty cloud (no saves yet, not an error).
+
+API error body containing `"not_enabled_for_client"` or `"disabled"` → throws
+`Exception("CLOUD_SAVES_NOT_SUPPORTED")` which is caught and shown as:
+"This game does not support GOG cloud saves"
+
+### Debug logging
+
+Both `uploadSaves` and `downloadSaves` write timestamped debug entries to
+`/sdcard/bh_cloud_debug.txt` (external storage, accessible from Termux). Log entries tagged `[GOG]`.
+
+### UI integration (GogGameDetailActivity)
+
+The "CLOUD SAVES" section in `GogGameDetailActivity` contains:
+- Folder path display (shows current save dir or "Not set")
+- **Browse** button — launches `FolderPickerActivity` to select the local save folder
+  (`REQUEST_FOLDER_PICKER = 200`); result path stored in `gog_cloud_dir_{gameId}` pref
+- **Upload** → calls `GogCloudSaveManager.uploadSaves(ctx, gameId, localFolder, callback)`
+- **Download** → calls `GogCloudSaveManager.downloadSaves(ctx, gameId, localFolder, callback)`
+- Status text updated via `Callback.onStatus()` and `Callback.onDone()` / `Callback.onError()`
+
+### FolderPickerActivity
+
+File: `extension/FolderPickerActivity.java`
+
+General-purpose folder picker launched via `startActivityForResult`. Features:
+- Root path dropdown (internal storage, external storage, app files dir)
+- Current path breadcrumb
+- Directory listing with tap-to-navigate
+- **New Folder** button to create subdirectories
+- **Select This Folder** button returns chosen path via `Intent.getStringExtra("path")`
+
+---
+
+## 22. BannerHub: DLC Management
+
+The DLC section appears in `GogGameDetailActivity` when the game has associated DLC entries
+in the local library data (populated during sync — games where `isDlc=true` are excluded from
+the main list but kept in the metadata store).
+
+### DLC display
+
+- Lists DLC titles owned by the account (filtered from the full game list where `isDlc=true`
+  and the DLC's base game matches `gameId`)
+- Shows install state per DLC where applicable
+
+### DLC in download pipeline
+
+The existing `GOGDownloadManager` already supports DLC via `withDlcs=true` (always passed).
+DLC depots are included automatically if the `productId` is present in
+`gogGameDao.getAllGameIdsIncludingExcluded()`. In BannerHub's smali implementation, this check
+uses the full owned-IDs set stored in SharedPreferences during library sync.

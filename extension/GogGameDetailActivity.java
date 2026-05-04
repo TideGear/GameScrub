@@ -31,7 +31,6 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Full-screen game detail view for a GOG library entry.
@@ -60,7 +59,8 @@ public class GogGameDetailActivity extends Activity {
 
     // Action section views (need refs for live updates)
     private Button launchBtn, installBtn, setExeBtn, uninstallBtn, copyBtn;
-    private TextView exeNameTV, sizeTV;
+    private TextView exeNameTV, installPathTV, storageTypeBadgeTV, sizeTV;
+    private View installPathRow;
     private ProgressBar progressBar;
     private TextView progressLabel;
     private Runnable cancelDownload;
@@ -94,8 +94,30 @@ public class GogGameDetailActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (cancelDownload != null) cancelDownload.run();
         super.onBackPressed();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (gameId == null) return;
+        String dlKey = "gog_" + gameId;
+        if (BhDownloadService.isActive(dlKey)) {
+            installBtn.setText("Cancel");
+            installBtn.setBackgroundColor(0xFFCC3333);
+            progressBar.setVisibility(View.VISIBLE);
+            progressLabel.setVisibility(View.VISIBLE);
+            launchBtn.setEnabled(false);
+            setExeBtn.setEnabled(false);
+            cancelDownload = () -> BhDownloadService.cancel(this, dlKey);
+            attachDownloadListener(dlKey);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (gameId != null) BhDownloadService.removeListener("gog_" + gameId);
     }
 
     // ── UI ────────────────────────────────────────────────────────────────────
@@ -163,9 +185,34 @@ public class GogGameDetailActivity extends Activity {
         scroll.addView(body);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
         setContentView(root);
+        hideSystemBars();
 
         refreshActionState();
         loadInstallSize();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideSystemBars();
+    }
+
+    private void hideSystemBars() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            android.view.WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) {
+                c.hide(android.view.WindowInsets.Type.statusBars() | android.view.WindowInsets.Type.navigationBars());
+                c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN);
+        }
     }
 
     private View makeInfoCard() {
@@ -229,8 +276,31 @@ public class GogGameDetailActivity extends Activity {
         exeNameTV = new TextView(this);
         exeNameTV.setTextColor(0xFF888888);
         exeNameTV.setTextSize(12f);
-        exeNameTV.setPadding(0, 0, 0, dp(8));
+        exeNameTV.setPadding(0, 0, 0, dp(4));
         card.addView(exeNameTV);
+
+        LinearLayout pathRow = new LinearLayout(this);
+        pathRow.setOrientation(LinearLayout.HORIZONTAL);
+        pathRow.setGravity(Gravity.CENTER_VERTICAL);
+        pathRow.setPadding(0, 0, 0, dp(8));
+        pathRow.setVisibility(View.GONE);
+        installPathRow = pathRow;
+
+        installPathTV = new TextView(this);
+        installPathTV.setTextColor(0xFF666666);
+        installPathTV.setTextSize(11f);
+        LinearLayout.LayoutParams pathLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        pathLp.setMarginEnd(dp(6));
+        installPathTV.setLayoutParams(pathLp);
+        pathRow.addView(installPathTV);
+
+        storageTypeBadgeTV = new TextView(this);
+        storageTypeBadgeTV.setTextSize(10f);
+        storageTypeBadgeTV.setTypeface(null, Typeface.BOLD);
+        storageTypeBadgeTV.setPadding(dp(6), dp(2), dp(6), dp(2));
+        pathRow.addView(storageTypeBadgeTV);
+
+        card.addView(pathRow);
 
         // Progress bar + label
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
@@ -319,6 +389,12 @@ public class GogGameDetailActivity extends Activity {
     // ── Install flow ──────────────────────────────────────────────────────────
 
     private void startInstall() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 0);
+        }
+        String dlKey = "gog_" + gameId;
         installBtn.setText("Cancel");
         installBtn.setBackgroundColor(0xFFCC3333);
         progressBar.setVisibility(View.VISIBLE);
@@ -326,17 +402,32 @@ public class GogGameDetailActivity extends Activity {
         launchBtn.setEnabled(false);
         setExeBtn.setEnabled(false);
 
-        cancelDownload = GogDownloadManager.startDownload(this, makeGogGame(), new GogDownloadManager.Callback() {
+        cancelDownload = () -> BhDownloadService.cancel(this, dlKey);
+        attachDownloadListener(dlKey);
+
+        GogGame game = makeGogGame();
+        Intent svc = new Intent(this, BhDownloadService.class);
+        svc.setAction(BhDownloadService.ACTION_START);
+        svc.putExtra(BhDownloadService.EXTRA_STORE, "GOG");
+        svc.putExtra(BhDownloadService.EXTRA_GAME_ID, dlKey);
+        svc.putExtra(BhDownloadService.EXTRA_GAME_NAME, title != null ? title : gameId);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_GAME_ID, game.gameId);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_TITLE, game.title);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_IMAGE_URL, game.imageUrl);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_DEVELOPER, game.developer);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_CATEGORY, game.category);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_GENERATION, game.generation);
+        startForegroundService(svc);
+    }
+
+    private void attachDownloadListener(String dlKey) {
+        BhDownloadService.addListener(dlKey, new BhDownloadService.DownloadListener() {
             @Override public void onProgress(String msg, int pct) {
-                uiHandler.post(() -> {
-                    progressBar.setProgress(pct);
-                    progressLabel.setText(msg);
-                });
+                uiHandler.post(() -> { progressBar.setProgress(pct); progressLabel.setText(msg); });
             }
-            @Override public void onComplete(String exePath) {
+            @Override public void onComplete(String installDir) {
                 cancelDownload = null;
                 uiHandler.post(() -> {
-                    progressBar.setProgress(100);
                     progressBar.setVisibility(View.GONE);
                     progressLabel.setVisibility(View.GONE);
                     setResult(RESULT_REFRESH);
@@ -348,10 +439,8 @@ public class GogGameDetailActivity extends Activity {
                 uiHandler.post(() -> {
                     progressBar.setVisibility(View.GONE);
                     progressLabel.setVisibility(View.GONE);
-                    installBtn.setText("Install");
                     installBtn.setBackgroundColor(0xFF5533CC);
-                    launchBtn.setEnabled(true);
-                    setExeBtn.setEnabled(true);
+                    refreshActionState();
                     Toast.makeText(GogGameDetailActivity.this, "Error: " + msg, Toast.LENGTH_LONG).show();
                 });
             }
@@ -360,15 +449,9 @@ public class GogGameDetailActivity extends Activity {
                 uiHandler.post(() -> {
                     progressBar.setVisibility(View.GONE);
                     progressLabel.setVisibility(View.GONE);
-                    installBtn.setText("Install");
                     installBtn.setBackgroundColor(0xFF5533CC);
-                    launchBtn.setEnabled(true);
-                    setExeBtn.setEnabled(true);
+                    refreshActionState();
                 });
-            }
-            @Override public void onSelectExe(List<String> candidates,
-                                               java.util.function.Consumer<String> onSelected) {
-                showExePicker(candidates, onSelected);
             }
         });
     }
@@ -384,11 +467,27 @@ public class GogGameDetailActivity extends Activity {
             .show();
     }
 
+    private AlertDialog showUninstallProgress() {
+        android.widget.LinearLayout ll = new android.widget.LinearLayout(this);
+        ll.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        ll.setPadding(dp(24), dp(24), dp(24), dp(24));
+        ll.setGravity(Gravity.CENTER_VERTICAL);
+        ll.addView(new android.widget.ProgressBar(this));
+        android.widget.TextView tv = new android.widget.TextView(this);
+        tv.setText("  Uninstalling…");
+        tv.setTextSize(16f);
+        ll.addView(tv);
+        AlertDialog d = new AlertDialog.Builder(this).setView(ll).setCancelable(false).create();
+        d.show();
+        return d;
+    }
+
     private void doUninstall() {
         String dirName = prefs.getString("gog_dir_" + gameId, null);
         if (dirName == null) return;
+        AlertDialog progress = showUninstallProgress();
         new Thread(() -> {
-            File installPath = GogInstallPath.getInstallDir(this, dirName);
+            File installPath = new File(dirName);
             deleteDir(installPath);
             prefs.edit()
                 .remove("gog_dir_" + gameId)
@@ -396,6 +495,7 @@ public class GogGameDetailActivity extends Activity {
                 .remove("gog_cover_" + gameId)
                 .apply();
             uiHandler.post(() -> {
+                progress.dismiss();
                 setResult(RESULT_REFRESH);
                 refreshActionState();
                 Toast.makeText(this, title + " uninstalled", Toast.LENGTH_SHORT).show();
@@ -404,6 +504,27 @@ public class GogGameDetailActivity extends Activity {
     }
 
     // ── State refresh ─────────────────────────────────────────────────────────
+
+    private void updateStorageBadge(String dir) {
+        if (installPathRow == null) return;
+        installPathTV.setText("Path: " + dir);
+        SharedPreferences sp = getSharedPreferences("steam_storage_pref", 0);
+        String sdPath = sp.getString("steam_storage_path", null);
+        boolean isSD = sdPath != null && !sdPath.isEmpty() && dir.startsWith(sdPath);
+        GradientDrawable badge = new GradientDrawable();
+        badge.setCornerRadius(dp(10));
+        if (isSD) {
+            badge.setColor(0xFF1B3A1B);
+            storageTypeBadgeTV.setTextColor(0xFF66BB6A);
+            storageTypeBadgeTV.setText("💾 SD Card");
+        } else {
+            badge.setColor(0xFF2A2A2A);
+            storageTypeBadgeTV.setTextColor(0xFF888888);
+            storageTypeBadgeTV.setText("📁 Internal");
+        }
+        storageTypeBadgeTV.setBackground(badge);
+        installPathRow.setVisibility(View.VISIBLE);
+    }
 
     private void refreshActionState() {
         if (exeNameTV == null) return;
@@ -414,8 +535,10 @@ public class GogGameDetailActivity extends Activity {
         if (installed) {
             exeNameTV.setText(".exe: " + new File(exe).getName());
             exeNameTV.setVisibility(View.VISIBLE);
+            updateStorageBadge(dir);
         } else {
             exeNameTV.setVisibility(View.GONE);
+            if (installPathRow != null) installPathRow.setVisibility(View.GONE);
         }
 
         launchBtn.setVisibility(installed ? View.VISIBLE : View.GONE);

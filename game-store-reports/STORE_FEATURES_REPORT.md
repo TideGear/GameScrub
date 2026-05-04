@@ -45,7 +45,7 @@
 | GOG-1 | Cloud Saves | ✅ v3.0.4-pre | Manual save folder; FolderPickerActivity; cloudstorage.gog.com |
 | GOG-2 | Update Checker | ✅ v3.0.1-pre | `content-system.gog.com/products/{id}/os/windows/builds`; compare `gog_build_{id}` |
 | GOG-3 | DLC Management | ✅ v3.0.3-pre | DLCs detected during sync; shown in detail with "Owned" badge; gen2 installs include depots |
-| GOG-4 | GOG Connect | ⬜ | Low priority — requires Steam session |
+| GOG-4 | GOG Connect | ❌ | Discontinued by GOG — removed |
 
 ### Epic Games
 | # | Job | Status | Notes |
@@ -200,7 +200,7 @@ Best-effort DLC detection in `parseEntitlement()` — probes `product.productTyp
 | GOG-2 Update Checker | ✅ v3.0.1-pre | ⬜ | |
 | GOG-3 DLC Management | ✅ v3.0.3-pre | ⬜ | |
 | GOG-1 Cloud Saves | ✅ v3.0.4-pre | — | After BH release |
-| GOG-4 GOG Connect | ⬜ | — | Complex Steam dep |
+| GOG-4 GOG Connect | ❌ | — | Discontinued by GOG |
 | EPIC-1 Free Games | ✅ v3.0.2-pre | ⬜ | |
 | EPIC-3 Update Checker | ✅ v3.0.1-pre | ⬜ | |
 | EPIC-4 DLC Management | ✅ v3.0.3-pre | ⬜ | |

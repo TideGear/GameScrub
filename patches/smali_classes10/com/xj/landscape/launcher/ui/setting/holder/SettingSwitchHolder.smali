@@ -249,6 +249,63 @@
     return-object p0
 
     :cond_normal_toggle
+    # ── BH patch: intercept SD card storage toggle (0x18) → show info dialog ──
+    const/16 v4, 0x18
+    if-ne v3, v4, :cond_do_toggle
+
+    iget-object v4, p0, Lcom/xj/landscape/launcher/databinding/LlauncherItemSettingFocusableSwitchBinding;->switchBtn:Lcom/xj/common/view/CommFocusSwitchBtn;
+    invoke-virtual {v4}, Lcom/xj/common/view/CommFocusSwitchBtn;->getContext()Landroid/content/Context;
+    move-result-object v5
+
+    # confirm listener (confirm=true; v2=0x1 from earlier)
+    new-instance v6, Lcom/xj/winemu/sidebar/BhStorageToggleListener;
+    invoke-direct {v6, v4, v0, v2}, Lcom/xj/winemu/sidebar/BhStorageToggleListener;-><init>(Lcom/xj/common/view/CommFocusSwitchBtn;ZZ)V
+
+    # cancel listener (confirm=false)
+    new-instance v7, Lcom/xj/winemu/sidebar/BhStorageToggleListener;
+    const/4 v8, 0x0
+    invoke-direct {v7, v4, v0, v8}, Lcom/xj/winemu/sidebar/BhStorageToggleListener;-><init>(Lcom/xj/common/view/CommFocusSwitchBtn;ZZ)V
+
+    new-instance v8, Landroid/app/AlertDialog$Builder;
+    invoke-direct {v8, v5}, Landroid/app/AlertDialog$Builder;-><init>(Landroid/content/Context;)V
+
+    if-nez v0, :cond_storage_on_title
+    const-string v4, "Disable External Storage?"
+    goto :goto_storage_title
+    :cond_storage_on_title
+    const-string v4, "Enable External Storage?"
+    :goto_storage_title
+    invoke-virtual {v8, v4}, Landroid/app/AlertDialog$Builder;->setTitle(Ljava/lang/CharSequence;)Landroid/app/AlertDialog$Builder;
+    move-result-object v8
+
+    if-nez v0, :cond_storage_on_msg
+    const-string v4, "When disabled, new GOG, Epic, and Amazon game downloads will save to internal app storage.\n\nGames already installed on the SD card will not be moved — they must be uninstalled from their current location separately."
+    goto :goto_storage_msg
+    :cond_storage_on_msg
+    const-string v4, "When enabled, GOG, Epic, and Amazon game downloads will be saved to your SD card at:\n\n  {SD card}/bannerhub/{store}/{game}/\n\nThe install location is locked at install time. Toggling this switch later will not affect games that are already installed — they will still uninstall from their original location."
+    :goto_storage_msg
+    invoke-virtual {v8, v4}, Landroid/app/AlertDialog$Builder;->setMessage(Ljava/lang/CharSequence;)Landroid/app/AlertDialog$Builder;
+    move-result-object v8
+
+    if-nez v0, :cond_storage_on_btn
+    const-string v4, "Turn Off"
+    goto :goto_storage_btn
+    :cond_storage_on_btn
+    const-string v4, "Turn On"
+    :goto_storage_btn
+    invoke-virtual {v8, v4, v6}, Landroid/app/AlertDialog$Builder;->setPositiveButton(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroid/app/AlertDialog$Builder;
+    move-result-object v8
+
+    const-string v4, "Cancel"
+    invoke-virtual {v8, v4, v7}, Landroid/app/AlertDialog$Builder;->setNegativeButton(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroid/app/AlertDialog$Builder;
+    move-result-object v8
+
+    invoke-virtual {v8}, Landroid/app/AlertDialog$Builder;->show()Landroid/app/AlertDialog;
+
+    sget-object p0, Lkotlin/Unit;->a:Lkotlin/Unit;
+    return-object p0
+
+    :cond_do_toggle
     invoke-static {v3, v0}, Lapp/revanced/extension/gamehub/prefs/GameHubPrefs;->handleSettingToggle(IZ)Z
 
     move-result v0

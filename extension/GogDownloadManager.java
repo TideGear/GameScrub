@@ -411,8 +411,12 @@ public final class GogDownloadManager {
                         }
                     }
                     fileLog2.add("FAIL file=" + df.relativePath);
-                    Log.e(TAG, "Gen2 file failed after 3 attempts: " + df.relativePath);
-                    anyFailed.set(true);
+                    if (isNonCriticalGogFile(df.relativePath)) {
+                        Log.w(TAG, "Gen2 non-critical file skipped after 3 attempts: " + df.relativePath);
+                    } else {
+                        Log.e(TAG, "Gen2 file failed after 3 attempts: " + df.relativePath);
+                        anyFailed.set(true);
+                    }
                     return null;
                 }));
             }
@@ -440,7 +444,7 @@ public final class GogDownloadManager {
 
             // Save install dir + build ID + client ID before exe resolution
             SharedPreferences.Editor ed0 = ctx.getSharedPreferences("bh_gog_prefs", 0).edit();
-            ed0.putString("gog_dir_" + game.gameId, installDir);
+            ed0.putString("gog_dir_" + game.gameId, installPath.getAbsolutePath());
             if (buildId != null && !buildId.isEmpty()) {
                 ed0.putString("gog_build_" + game.gameId, buildId);
             }
@@ -628,7 +632,7 @@ public final class GogDownloadManager {
             cb.onProgress("Install complete!", 100);
 
             SharedPreferences.Editor ed0 = ctx.getSharedPreferences("bh_gog_prefs", 0).edit();
-            ed0.putString("gog_dir_" + game.gameId, installDir);
+            ed0.putString("gog_dir_" + game.gameId, installPath.getAbsolutePath());
             ed0.apply();
 
             List<String> candidates = collectExeCandidates(installPath);
@@ -721,7 +725,7 @@ public final class GogDownloadManager {
 
             // Save prefs
             SharedPreferences.Editor ed = ctx.getSharedPreferences("bh_gog_prefs", 0).edit();
-            ed.putString("gog_dir_" + game.gameId, game.title);
+            ed.putString("gog_dir_" + game.gameId, installDir.getAbsolutePath());
             ed.putString("gog_exe_" + game.gameId, outFile.getAbsolutePath());
             ed.apply();
 
@@ -836,6 +840,14 @@ public final class GogDownloadManager {
     // ─────────────────────────────────────────────────────────────────────────
     // Helpers
     // ─────────────────────────────────────────────────────────────────────────
+
+    /** GOG Galaxy metadata files — not needed to launch the game; skip on CDN failure. */
+    private static boolean isNonCriticalGogFile(String path) {
+        String name = path.contains("/") ? path.substring(path.lastIndexOf('/') + 1) : path;
+        return name.startsWith("goggame-") &&
+                (name.endsWith(".hashdb") || name.endsWith(".info") ||
+                 name.endsWith(".ico")    || name.endsWith(".script"));
+    }
 
     /** Parses a Gen 2 depot manifest and appends DepotFile entries to {@code out}. */
     private static void parseDepotManifest(String json, List<DepotFile> out) {

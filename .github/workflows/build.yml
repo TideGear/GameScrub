@@ -60,6 +60,58 @@ jobs:
             echo "No patches to apply."
           fi
 
+      - name: Inject build version
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          echo "Build version: $VERSION"
+          sed -i "s/^  versionName: .*/  versionName: $VERSION/" apktool_out_base/apktool.yml
+          echo "versionName -> $VERSION"
+
+      - name: Patch AppUtils phone-home version
+        run: |
+          python3 << 'PYEOF'
+          import sys
+
+          def patch(path, old, new, label):
+              try:
+                  content = open(path, encoding='utf-8').read()
+              except UnicodeDecodeError:
+                  content = open(path, encoding='latin-1').read()
+              if old not in content:
+                  print(f"ERROR: anchor not found in {path} for: {label}")
+                  sys.exit(1)
+              open(path, 'w', encoding='utf-8').write(content.replace(old, new, 1))
+              print(f"OK: {label}")
+
+          patch(
+              'apktool_out_base/smali_classes13/com/xj/common/http/ClientParams.smali',
+              '    invoke-static {}, Lcom/blankj/utilcode/util/AppUtils;->e()Ljava/lang/String;\n'
+              '\n'
+              '    .line 40\n'
+              '    .line 41\n'
+              '    .line 42\n'
+              '    move-result-object v3\n',
+              '    # BannerHub: hardcode phone-home version — versionName is now BH version\n'
+              '    const-string v3, "5.3.5"\n',
+              'ClientParams: hardcode AppUtils.getAppVersionName() -> 5.3.5'
+          )
+
+          patch(
+              'apktool_out_base/smali_classes7/com/xj/common/http/TokenInterceptor.smali',
+              '    invoke-static {}, Lcom/blankj/utilcode/util/AppUtils;->e()Ljava/lang/String;\n'
+              '\n'
+              '    .line 65\n'
+              '    .line 66\n'
+              '    .line 67\n'
+              '    move-result-object v8\n',
+              '    # BannerHub: hardcode phone-home version — versionName is now BH version\n'
+              '    const-string v8, "5.3.5"\n',
+              'TokenInterceptor: hardcode AppUtils.getAppVersionName() -> 5.3.5'
+          )
+
+          print("AppUtils phone-home patches applied.")
+          PYEOF
+
       - name: Apply Grant Root Access smali patches
         run: |
           python3 << 'PYEOF'
@@ -223,9 +275,23 @@ jobs:
               '    invoke-direct/range {v9 .. v17}, Lcom/xj/common/view/popup/Option;-><init>(Ljava/lang/String;ZIIILkotlin/jvm/functions/Function1;ILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
               '    invoke-interface {v1, v9}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
               '\n'
+              '    # BH: Frontend Export option\n'
+              '    new-instance v9, Lcom/xj/common/view/popup/Option;\n'
+              '    const-string v10, "Frontend Export"\n'
+              '    const/4 v11, 0x0\n'
+              '    const/4 v12, 0x0\n'
+              '    const/4 v13, 0x0\n'
+              '    const/4 v14, 0x0\n'
+              '    new-instance v15, Lcom/xj/landscape/launcher/ui/gamedetail/BhFrontendExportLambda;\n'
+              '    invoke-direct {v15, v4, v3}, Lcom/xj/landscape/launcher/ui/gamedetail/BhFrontendExportLambda;-><init>(Lcom/xj/landscape/launcher/ui/gamedetail/GameDetailSettingMenu;Lcom/xj/common/service/bean/GameDetailEntity;)V\n'
+              '    const/16 v16, 0x1e\n'
+              '    const/16 v17, 0x0\n'
+              '    invoke-direct/range {v9 .. v17}, Lcom/xj/common/view/popup/Option;-><init>(Ljava/lang/String;ZIIILkotlin/jvm/functions/Function1;ILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
+              '    invoke-interface {v1, v9}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
+              '\n'
               '    return-object v1\n'
               '.end method\n',
-              'GameDetailSettingMenu.W(): inject Export Config + Import Config options'
+              'GameDetailSettingMenu.W(): inject Export Config + Import Config + Frontend Export options'
           )
           print("Settings Import/Export patch applied.")
           PYEOF
@@ -487,6 +553,12 @@ jobs:
 
           # Inject original classes12.dex (skipped smali reassembly due to dex index limit)
           zip rebuilt-unsigned.apk apktool_out/classes12.dex --junk-paths
+
+      - name: Inject BH_VERSION into extension
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          sed -i "s/static final String BH_VERSION = \"[^\"]*\"/static final String BH_VERSION = \"$VERSION\"/" extension/BhSettingsExporter.java
+          echo "BH_VERSION -> $VERSION"
 
       - name: Compile and inject GOG extension dex
         run: |

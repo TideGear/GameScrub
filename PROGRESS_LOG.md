@@ -4,6 +4,530 @@ Tracks every commit, patch, and change applied to the GameHub 5.3.5 ReVanced APK
 
 ---
 
+### [stable] — v3.5.0 — External storage, system bars, uninstall UX, storage badge (2026-04-27)
+**Tag:** v3.5.0  |  **CI:** run 25024033767 ✅  |  **Release:** https://github.com/The412Banner/BannerHub/releases/tag/v3.5.0
+#### What shipped (all pre1–pre12 over v3.4.1)
+- SD card / external storage toggle for GOG/Epic/Amazon installs + confirmation dialog + renamed label
+- Install path display with 💾 SD Card / 📁 Internal badge on all three detail pages
+- System bars hidden across all store screens, detail pages, download manager, Component Manager
+- Uninstall spinner across all stores/screens
+- GOG detail page doUninstall path fix
+- GOG CDN non-critical metadata skip
+
+---
+
+### [pre-release] — v3.4.2-pre11 — feat(ui): storage location badge on install path row (2026-04-27)
+**Commit:** `f1b1696`  |  **Tag:** v3.4.2-pre11  |  **CI:** run 25023554124 ✅
+#### What changed
+- GOG, Epic, Amazon detail pages now show a colored pill badge next to the install path
+- `💾 SD Card` (green on dark green) when path starts with the stored SD card root (`steam_storage_path` pref)
+- `📱 Internal` (grey on dark grey) when path is in internal app storage
+- Path + badge share a horizontal `LinearLayout` row; badge re-evaluates on every `refreshActionState()` call
+- New fields: `storageTypeBadgeTV`, `installPathRow` (all three detail activities)
+- New helper: `updateStorageBadge(String dir)` in each detail activity
+#### Files touched
+- `extension/GogGameDetailActivity.java`
+- `extension/EpicGameDetailActivity.java`
+- `extension/AmazonGameDetailActivity.java`
+
+---
+
+### [pre-release] — v3.4.2-pre10 — feat(settings): SD card storage toggle confirmation dialog + rename (2026-04-27)
+**Commit:** `3455663`  |  **Tag:** v3.4.2-pre10  |  **CI:** run 25023075869 ✅
+#### What changed
+- Turning the storage toggle ON now shows a dialog explaining games will save to `{SD card}/bannerhub/{store}/{game}/` and that install location is locked at install time
+- Turning the toggle OFF shows a dialog explaining new games go to internal storage and existing SD card installs are not moved
+- Both dialogs have Cancel (reverts switch visual) and Turn On/Turn Off (applies change) buttons
+- Cancel path reverts the switch visually using `BhStorageToggleListener` (confirm=false → XOR newValue to restore old state)
+- Confirm path calls `GameHubPrefs.handleSettingToggle(0x18, newValue)` — if SD card not found it still returns false and the switch resets
+- Toggle label renamed from `"SD Card Storage"` → `"Save Store Games to External Storage (SD Card)"`
+#### New files
+- `patches/smali_classes16/com/xj/winemu/sidebar/BhStorageToggleListener.smali`
+#### Files touched
+- `patches/smali_classes10/.../SettingSwitchHolder.smali` (intercept at `:cond_normal_toggle`)
+- `patches/smali_classes6/.../GameHubPrefs.smali` (rename label string)
+
+---
+
+### [pre-release] — v3.4.2-pre9 — feat(ui): uninstall progress spinner (2026-04-27)
+**Commit:** `1301cb7`  |  **Tag:** v3.4.2-pre9  |  **CI:** run 25022797024 ✅
+#### What changed
+- Shows a non-cancelable spinner dialog ("Uninstalling…") immediately after user confirms uninstall
+- Dismisses just before the completion toast, covering the file deletion delay
+- Applied to all uninstall paths across all three stores:
+  - `GogGameDetailActivity`, `EpicGameDetailActivity`, `AmazonGameDetailActivity`
+  - `GogGamesActivity` (game list context menu + `uninstall()` helper)
+  - `BhDownloadsActivity` (download manager)
+- New helper `showUninstallProgress()` added to each activity; returns non-cancelable `AlertDialog` with horizontal spinner + label
+#### Files touched
+- `extension/GogGameDetailActivity.java`
+- `extension/GogGamesActivity.java`
+- `extension/EpicGameDetailActivity.java`
+- `extension/AmazonGameDetailActivity.java`
+- `extension/BhDownloadsActivity.java`
+
+---
+
+### [pre-release] — v3.4.2-pre8 — fix(gog): align detail page doUninstall with download manager (2026-04-27)
+**Commit:** `8865804`  |  **Tag:** v3.4.2-pre8  |  **CI:** run 25022366388 ✅
+#### What changed
+- `GogGameDetailActivity.doUninstall()` was calling `GogInstallPath.getInstallDir(this, dirName)` to reconstruct the path instead of using the stored absolute path directly
+- Changed to `new File(dirName)` — same pattern as `BhDownloadsActivity` and `GogGamesActivity`
+- Was accidentally working post-pre3 because Java ignores parent when child is absolute; fixed to be correct by design
+- Epic and Amazon detail pages already used `new File(dir)` — no change needed
+#### Files touched
+- `extension/GogGameDetailActivity.java` (line 457)
+
+---
+
+### [pre-release] — v3.4.2-pre7 — feat: install path display on game detail pages (2026-04-27)
+**Commit:** `cc219bf`  |  **Tag:** v3.4.2-pre7  |  **CI:** run 25019459591 ✅
+#### What changed
+- GOG, Epic, and Amazon game detail pages now show the full install path below the `.exe` row in the ACTIONS card
+- Path is visible only when the game is installed; hidden otherwise
+- Reads from `gog_dir_{gameId}`, `epic_dir_{appName}`, `amazon_dir_{productId}` prefs (already stores full absolute path since pre3)
+#### Files touched
+- `extension/GogGameDetailActivity.java`
+- `extension/EpicGameDetailActivity.java`
+- `extension/AmazonGameDetailActivity.java`
+
+---
+
+### [pre-release] — v3.4.2-pre6 — fix(ui): hide system bars in Component Manager + Component Download (2026-04-27)
+**Commit:** `(pre6)`  |  **Tag:** v3.4.2-pre6  |  **CI:** run 25019028444 ✅
+#### What changed
+- Smali injection in `ComponentManagerActivity.onCreate`: bumped `.locals 0` → `.locals 3`, injected `WindowInsetsController.hide(statusBars|navBars)` + `setSystemBarsBehavior(BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE)`
+- Added `onWindowFocusChanged` to `ComponentManagerActivity` (re-hides bars on focus return)
+- Same injection in `ComponentDownloadActivity.onCreate` (already had `.locals 8`; added after `setContentView`)
+- Added `onWindowFocusChanged` to `ComponentDownloadActivity`
+- Key smali fix: `navigationBars()I` returns int — must use `move-result v2`, NOT `move-result-object`
+#### Files touched
+- `patches/smali_classes16/com/xj/landscape/launcher/ui/menu/ComponentManagerActivity.smali`
+- `patches/smali_classes16/com/xj/landscape/launcher/ui/menu/ComponentDownloadActivity.smali`
+
+---
+
+### [pre-release] — v3.4.2-pre5 — fix(ui): hide system bars in detail pages + download manager (2026-04-27)
+**Commit:** `(pre5)`  |  **Tag:** v3.4.2-pre5  |  **CI:** run 25018854491 ✅
+#### What changed
+- Added `hideSystemBars()` + `onWindowFocusChanged` to `GogGameDetailActivity`, `EpicGameDetailActivity`, `AmazonGameDetailActivity`, `BhDownloadsActivity`
+#### Files touched
+- `extension/GogGameDetailActivity.java`
+- `extension/EpicGameDetailActivity.java`
+- `extension/AmazonGameDetailActivity.java`
+- `extension/BhDownloadsActivity.java`
+
+---
+
+### [pre-release] — v3.4.2-pre4 — fix(ui): hide status and nav bars in GOG/Epic/Amazon store screens (2026-04-27)
+**Commit:** `(pre4)`  |  **Tag:** v3.4.2-pre4  |  **CI:** run 25018293987 ✅
+#### What changed
+- Status bar and navigation bar were overlapping buttons at the top of all three store list screens
+- Added `hideSystemBars()` using `WindowInsetsController` (API 30+) with legacy `setSystemUiVisibility` fallback
+- Added `onWindowFocusChanged` override to re-apply on focus return
+#### Files touched
+- `extension/GogGamesActivity.java`
+- `extension/EpicGamesActivity.java`
+- `extension/AmazonGamesActivity.java`
+
+---
+
+### [pre-release] — v3.4.2-pre3 — fix: GOG uninstall now deletes from SD card correctly (2026-04-27)
+**Commit:** `1ff9b4c`  |  **Tag:** v3.4.2-pre3  |  **CI:** run 25015554884 ✅
+#### What changed
+- `GogDownloadManager` now saves the full absolute install path to `gog_dir_` pref (e.g. `/storage/XXXX/bannerhub/gog_games/Gun Slugs 2`) instead of just the folder name (`"Gun Slugs 2"`)
+- `GogGamesActivity` uninstall now reads that absolute path directly and deletes it — no path reconstruction via `BhStoragePath` needed
+- Fixes GOG games not being deleted on uninstall when installed to SD card
+- Same pattern Amazon and Epic already used successfully
+- `BhDownloadsActivity` GOG uninstall already used `new File(dir)` so it works automatically with the new full path
+#### Files touched
+- `extension/GogDownloadManager.java`
+- `extension/GogGamesActivity.java`
+
+---
+
+### [pre-release] — v3.4.2-pre2 — feat: SD card storage toggle routes GOG/Epic/Amazon downloads to SD card (2026-04-27)
+**Commit:** `a91f0b0`  |  **Tag:** v3.4.2-pre2  |  **CI:** run 25003766750 ✅
+#### What changed
+- Rewrote the SD Card Storage toggle behaviour — when enabled, GOG, Epic, and Amazon downloads now install to the SD card instead of internal storage
+- New helper `BhStoragePath.java`: reads `use_custom_storage` + `steam_storage_path` prefs (set by the existing toggle detection logic) and returns `{sdCardRoot}/bannerhub/{storeFolder}/{gameName}` when on, `{filesDir}/{storeFolder}/{gameName}` when off
+- `GogInstallPath.getInstallDir()` now delegates to `BhStoragePath` — all 4 GOG call sites in `GogGamesActivity` get SD card routing automatically
+- `EpicGamesActivity`: install dir and StatFs storage check updated
+- `AmazonGamesActivity`: install dir and StatFs storage check updated
+- "Available storage" dialog in all three stores now reflects SD card free space when toggle is on
+- SD card layout: `/storage/XXXX-XXXX/bannerhub/gog_games/`, `/storage/XXXX-XXXX/bannerhub/epic_games/`, `/storage/XXXX-XXXX/bannerhub/Amazon/`
+- Toggle off behaviour unchanged — falls back to internal `getFilesDir()` as before
+#### Files touched
+- `extension/BhStoragePath.java` (new)
+- `extension/GogInstallPath.java`
+- `extension/EpicGamesActivity.java`
+- `extension/AmazonGamesActivity.java`
+- `PROGRESS_LOG.md`
+
+---
+
+
+### [fix] — v3.4.2-pre1 — GOG: skip non-critical metadata files on CDN failure (2026-04-25)
+**Commit:** `58587f5`  |  **Tag:** v3.4.2-pre1  |  **CI:** run 24942760582 ✅
+#### What changed
+- Added `isNonCriticalGogFile()` helper in `GogDownloadManager.java`: matches `goggame-*.hashdb/.info/.ico/.script`
+- On 3-retry CDN failure, matching files now log a warning and are skipped rather than setting `anyFailed` and aborting the entire install
+- Fixes No Man's Sky (and any game with a bundled secondary product ID) where GOG metadata files for the secondary product ID fail because the `secure_link` CDN token is scoped to the primary product only
+- Game content and exe are unaffected; these files are GOG Galaxy client metadata, not required for launch
+
+---
+
+### [rollback] — v3.4.2-pre1 + pre2 rolled back to v3.4.1 (2026-04-25)
+**Action:** Deleted remote tags `v3.4.2-pre1` and `v3.4.2-pre2`; force-reset `main` to `v3.4.1` SHA `9048216`
+#### What happened
+- NeoStation `fromSteamLib` fix (pre1 + pre2) was reverted — the work was dropped, not parked
+- Repo and main branch are clean at v3.4.1; no pre-release artifacts remain
+#### If re-implementing later
+- pre1: `startsWith("local_")` guard in `GameDetailActivity.smali` to block `fromSteamLib=true` for local import UUIDs
+- pre2: additional `startsWith("{")` guard for unresolved NeoStation template tags (e.g. `{tags.steamappid}`)
+
+---
+
+### [fix] — v3.4.2-pre2 — Block fromSteamLib for unresolved NeoStation templates (2026-04-25) ⚠️ ROLLED BACK
+**Commit:** `099ec34`  |  **Tag:** v3.4.2-pre2 (deleted)  |  **CI:** run 24941693436 ✅
+#### What changed
+- Extended pre1 fix: added `startsWith("{")` check alongside `startsWith("local_")` to block `fromSteamLib=true` when NeoStation sends a literal unresolved template tag (e.g. `{tags.steamappid}`) as the steamAppId
+#### Files touched
+- `GameDetailActivity.smali` (via CI patch in `build-quick.yml`)
+
+---
+
+### [fix] — v3.4.2-pre1 — Skip fromSteamLib=true for local_ import IDs from NeoStation (2026-04-25) ⚠️ ROLLED BACK
+**Commit:** `b23a28b`  |  **Tag:** v3.4.2-pre1 (deleted)  |  **CI:** run 24941057062 ✅
+#### What changed
+- When NeoStation launches a local import game via `LAUNCH_GAME` intent, `steamAppId` receives a `local_` UUID which has `length > 0`, incorrectly setting `fromSteamLib=true` and crashing on the Steam library code path
+- Added `startsWith("local_")` check after the length guard to route local imports correctly
+#### Files touched
+- `GameDetailActivity.smali` (via CI patch in `build-quick.yml`)
+
+---
+
+### [stable] — v3.4.1 — Hotfix: Frontend Export missing from stable build (2026-04-25)
+**Commit:** `9048216`  |  **Tag:** v3.4.1  |  **CI:** run 24938018763 ✅
+#### What changed
+- Cut stable from v3.4.1-pre1; no new code beyond the pre-release fix
+- Latest stable; main currently points here after v3.4.2 rollback
+
+---
+
+### [fix] — v3.4.1-pre1 — Add Frontend Export to stable build.yml smali patch (2026-04-25)
+**Commit:** `d729899`  |  **Tag:** v3.4.1-pre1  |  **CI:** run 24937880585 ✅
+#### What changed
+- `build-quick.yml` already had the `GameDetailSettingMenu` smali injection for Frontend Export; `build.yml` was missing it entirely
+- v3.4.0 stable shipped without the Frontend Export menu item; pre-releases worked fine
+- Added the matching injection block to `build.yml` to fix stable builds
+#### Files touched
+- `.github/workflows/build.yml`
+
+---
+
+### [docs] — README: Obtainium auto-update section (2026-04-25)
+**Commit:** `6fbe20e`  |  **Tag:** none  |  **CI:** n/a (docs only)
+#### What changed
+- Added `## Keeping BannerHub Updated` section after Installation, covering Obtainium setup
+- Key point documented: "Reconcile version string with version detected from OS" must be ON; works correctly starting v3.4.0
+- Warning callout added: do not track pre-releases in Obtainium (different package name)
+- TOC updated with new section link
+#### Files touched
+- `README.md`
+
+---
+
+
+### [stable] — v3.4.0 — ES-DE frontend export, dynamic versioning (2026-04-25)
+**Commit:** `8e5ac3d`  |  **Tag:** v3.4.0  |  **CI:** run 24935382300 ✅
+#### What changed
+- Cut stable from v3.3.1-pre4; no new code beyond the pre-release series
+- Release description: added Obtainium section (screenshot, "Reconcile version string with version detected from OS" toggle); Installation section now links to README#installation instead of inlining APK details
+#### Files touched
+- n/a (tag-only cut)
+
+---
+
+### [fix] — v3.3.1-pre3 — Restore Beacon/ES-DE items in frontend export dialog (2026-04-25)
+**Commit:** `dd90994`  |  **Tag:** v3.3.1-pre3  |  **CI:** ✅
+#### What changed
+- `setMessage()` and `setItems()` are mutually exclusive in `AlertDialog.Builder` — when both are called, `setItems()` silently drops the items
+- Switched from `setMessage()` to `setCustomTitle()` using a `LinearLayout` containing title `TextView` + description `TextView`; items now render correctly alongside the description
+#### Files touched
+- `extension/BhSettingsExporter.java`
+
+---
+
+### [stable] — v3.3.0 — Background download service, download manager, ES-DE export, expanded config detail (2026-04-25)
+**Commit:** `c284ef2`  |  **Tag:** v3.3.0  |  **CI:** run 24918245723 ✅
+#### What changed
+- Cut stable from v3.2.1-pre9; bundles all download service + manager work and the expanded config detail screen from v3.1.1-pre1
+- Full set of new features: BhDownloadService foreground service, BhDownloadsActivity cross-store download manager, live ⬇ badge on dashboard, persistent game library, ES-DE frontend export, expanded config detail (11 rows), Beacon orphan task fix
+#### Files touched
+- n/a (tag-only cut)
+
+---
+
+### [fix] — v3.2.1-pre9 — Resolve classes11 DEX method ref overflow (2026-04-24)
+**Commit:** `2c0bfda`  |  **Tag:** v3.2.1-pre9  |  **CI:** ✅
+#### What changed
+- pre8 pushed the classes11 DEX over the 64K method reference limit causing a build-time overflow
+- Moved excess methods to a less-loaded DEX bucket to bring classes11 back under the limit
+#### Files touched
+- `.github/workflows/build.yml` / `build-quick.yml` (DEX split config)
+
+---
+
+### [feat] — v3.2.1-pre8 — Live download manager shortcut on dashboard (2026-04-24)
+**Commit:** `845617d`  |  **Tag:** v3.2.1-pre8  |  **CI:** ✅
+#### What changed
+- Replaced the BCI quick-launch button on the BannerHub dashboard with a direct shortcut to `BhDownloadsActivity`
+- Button shows a live red count badge (e.g. **⬇ 2**) when downloads are active, updated in real time as jobs start and finish; returns to plain **⬇** when idle
+- Badge driven by a `BroadcastReceiver` listening for `BhDownloadService` progress events — no polling
+#### Files touched
+- `extension/BhDashboardFragment.java`
+
+---
+
+### [fix] — v3.2.1-pre7 — Uninstall button after cancel/error; refresh game list on exit (2026-04-24)
+**Commit:** `8d0e29e`  |  **Tag:** v3.2.1-pre7  |  **CI:** ✅
+#### What changed
+- Cancelling or erroring a download now correctly shows the **Uninstall** button on the detail screen so partial game folders can be cleaned up without reopening the screen
+- Uninstalling a game inside the download manager now immediately refreshes the game list on return — no more stale installed state after removal
+#### Files touched
+- `extension/BhDownloadsActivity.java`
+- `extension/BhDownloadService.java`
+
+---
+
+
+### [feat] — v3.3.1-pre4 — Dynamic versionName + BH_VERSION from tag; phone-home hardcoded to 5.3.5 (2026-04-24)
+**Commit:** `d37fcf4b7`  |  **Tag:** v3.3.1-pre4  |  **CI:** ⏳ (triggered)
+#### What changed
+- CI now strips the `v` prefix from the git tag and injects the result as `versionName` in `apktool.yml` and `BH_VERSION` in `extension/BhSettingsExporter.java` — no more manual bumping of either value on any release
+- `ClientParams.smali` (smali_classes13) and `TokenInterceptor.smali` (smali_classes7): `AppUtils->e()` (getAppVersionName) calls replaced with `const-string "5.3.5"` via CI Python patch so GameHub always phones home as 5.3.5 regardless of what Android displays
+- Android now displays the BH version (e.g. `3.3.1-pre4`); game setting profiles embed the same version automatically
+- **Critical note:** phone-home must stay at 5.3.5 (≥4.1.5). Reporting below 4.0 or between 4.0–4.1.5 causes the GameHub server to hide the Steam card on the dashboard
+#### Files touched
+- `.github/workflows/build.yml`
+- `.github/workflows/build-quick.yml`
+
+---
+
+### [feat] — v3.3.1-pre2 — Frontend Export dialog description (2026-04-24)
+**Commit:** `028a04534`  |  **Tag:** v3.3.1-pre2  |  **CI:** ⏳ (triggered)
+#### What changed
+- Frontend Export dialog now shows a description above the frontend list: "Select a frontend. The output file will be saved to:" followed by the resolved base path (`Downloads/bannerhub/frontend/`)
+- Path is resolved at runtime via `Environment.getExternalStoragePublicDirectory`
+#### Files touched
+- `extension/BhSettingsExporter.java`
+
+> **Release description note (v3.4.0 stable):** In the ES-DE section of the release description, include [RobZombie9043/steam-files-es-de](https://github.com/RobZombie9043/steam-files-es-de) as a user-facing fallback resource — pre-made `.steam` files for Steam catalog games in case the exported file doesn't work for a specific title.
+
+---
+
+### [feat] — v3.3.1-pre1 — ES-DE frontend export (.steam file) (2026-04-24)
+**Commit:** `02cc5984b`  |  **Tag:** v3.3.1-pre1  |  **CI:** ⏳ (triggered)
+#### What changed
+- Frontend Export dialog now lists two options: **Beacon** and **ES-DE**
+- ES-DE export writes the resolved gameId to `Downloads/bannerhub/frontend/ES-DE/{gameName}.steam`
+- Same gameId logic as Beacon: `localGameId` for imported games, `getSteamAppId()` for Steam catalog games
+- No smali changes required — gameId resolution already handled in `BhFrontendExportLambda.smali`
+#### Files touched
+- `extension/BhSettingsExporter.java`
+- `README.md`
+
+---
+
+### [fix] — v3.2.1-pre6 — Correct store pref keys for Launch from download manager (2026-04-24)
+**Commit:** `ddda57c3b`  |  **Tag:** v3.2.1-pre6  |  **CI:** ⏳ (triggered)
+#### What changed
+- GOG Launch from download manager was calling `GogLaunchHelper.triggerLaunch(this, exe)` which internally calls `activity.finish()` — closing BhDownloadsActivity instead of launching the game
+- Amazon Launch was writing `pending_epic_exe` (wrong key) to `bh_amazon_prefs` instead of `pending_amazon_exe` — launcher would never pick it up
+- Fix: `pendingLaunchExe` now takes an explicit pref-key parameter; each store passes its correct key (`pending_gog_exe` / `pending_epic_exe` / `pending_amazon_exe`); `GogLaunchHelper` no longer called from BhDownloadsActivity
+#### Files touched
+- `extension/BhDownloadsActivity.java`
+
+---
+
+### [feat] — v3.2.1-pre5 — Persistent game library in download manager (2026-04-24)
+**Commit:** `72b1f4f32`  |  **Tag:** v3.2.1-pre5  |  **CI:** run 24916480827 ⏳
+#### What changed
+- `BhDownloadsActivity` now doubles as a cross-store installed-game library
+- Completed downloads persist to `bh_library` SharedPreferences in `BhDownloadService.saveLibraryEntry()`; survive app restart and navigation
+- Completed rows: game name, store badge (Epic blue / GOG purple / Amazon orange), **Launch**, **Uninstall**, and **×** remove button
+- Active download rows convert in-place to completed rows when the download finishes (no flicker)
+- Library populated on `onResume` so rows are always present when returning to the screen
+- **"Clear ✓"** header button removes all completed entries from view and prefs
+- Launch: Epic/Amazon write `pending_epic_exe` to store-specific prefs + start main launcher; GOG uses `GogLaunchHelper.triggerLaunch`
+- Uninstall: deletes install dir, clears `exe_` and `dir_` prefs, removes library entry
+- `BhDownloadService.runGog` now stores `gog_dir_` pref and passes installDir (not exe path) to `notifyComplete` — consistent with Epic/Amazon
+- Empty state text updated to "No downloads or installed games"
+#### Files touched
+- `extension/BhDownloadsActivity.java`
+- `extension/BhDownloadService.java`
+
+---
+
+### [fix] — v3.2.1-pre4 — List-page downloads now route through BhDownloadService (2026-04-24)
+**Commit:** `54c0c957e`  |  **Tag:** v3.2.1-pre4  |  **CI:** run 24916138606 ⏳
+#### What changed
+- Downloads started from the game list screens (Epic, GOG, Amazon) now go through `BhDownloadService`, just like downloads from the detail page
+- Added `startViaServiceAmazon`, `startViaServiceEpic`, `startViaServiceGog` helper methods that fire `startForegroundService` + register a `DownloadListener` bridge to the card UI callbacks
+- All 7 inline download call sites in the three list activities replaced: `startAmazonDownload` × 2, `startEpicDownload` × 2, `GogDownloadManager.startDownload` × 3
+- GOG grid dialog `onComplete` updated: exe path now looked up from prefs (`gog_exe_` + gameId) rather than using the install-dir string passed from the service
+- Card UI progress still updates live via listener; notification bar and BhDownloadsActivity now show list-page downloads
+#### Files touched
+- `extension/AmazonGamesActivity.java`
+- `extension/EpicGamesActivity.java`
+- `extension/GogGamesActivity.java`
+
+---
+
+### [fix] — v3.2.1-pre3 — Foreground service types + runtime notification permission (2026-04-24)
+**Commit:** `caf55a49e`  |  **Tag:** v3.2.1-pre3  |  **CI:** run 24915638870 ⏳
+#### What changed
+- `AndroidManifest.xml`: added `android:foregroundServiceType="specialUse"` to all 12 GameHub services missing a type — fixes `MissingForegroundServiceTypeException` crash on launch (Android 14+ with targetSdk 35)
+  - `DeviceManagementService`, `DownloadService`, `MappingService`, `KeyboardEditService`, `SSLClientService`, `VTouchIPCService`, `UnzipService`, `EmuFileService`, `SteamService`, `DiscoveryService`, `ComputerManagerService`, `UsbDriverService`
+- `EpicGameDetailActivity`, `GogGameDetailActivity`, `AmazonGameDetailActivity`: added `requestPermissions(POST_NOTIFICATIONS)` check at top of `startInstall()` (API 33+ guard); user is prompted for notification permission the first time they start a download
+#### Files touched
+- `patches/AndroidManifest.xml`
+- `extension/EpicGameDetailActivity.java`
+- `extension/GogGameDetailActivity.java`
+- `extension/AmazonGameDetailActivity.java`
+
+---
+
+### [feat] — v3.2.1-pre2 — In-app download manager screen (2026-04-24)
+**Commit:** `ecae59d15`  |  **Tag:** v3.2.1-pre2  |  **CI:** run 24915238124 ⏳
+#### What changed
+- `BhDownloadsActivity`: new screen showing all active downloads with live progress bars and per-download Cancel button; shows "No active downloads" when idle
+- `BhDownloadService`: added `GlobalListener` interface for watching all downloads at once; `getActiveJobs()`, `getGameName()`, `getLastMsg()`, `getLastPct()` for activity reconnect on resume; last-progress snapshot maps
+- `GogGamesActivity`, `EpicGamesActivity`, `AmazonGamesActivity`: ⬇ button added to header, launches `BhDownloadsActivity`
+- Error rows stay visible for 3 seconds before auto-removing
+#### Files touched
+- `extension/BhDownloadsActivity.java` (new)
+- `extension/BhDownloadService.java`
+- `extension/GogGamesActivity.java`
+- `extension/EpicGamesActivity.java`
+- `extension/AmazonGamesActivity.java`
+- `patches/AndroidManifest.xml`
+
+---
+
+### [feat] — v3.2.1-pre1 — Background download service (2026-04-24)
+**Commit:** `b9437a29c`  |  **Tag:** v3.2.1-pre1  |  **CI:** run 24914826132 ⏳
+#### What changed
+- New `BhDownloadService` (foreground service): downloads for Epic, GOG, and Amazon now run in the background — user can leave the game detail screen while downloading
+- Persistent progress notification shows game name, progress bar, and a Cancel action
+- Activity reconnects live progress on resume if the service is still running (`BhDownloadService.isActive()` + `addListener()`)
+- When the activity is not visible, completion/error posts a notification instead
+- Service auto-picks the best exe on completion (same scoring as before); "Set .exe…" button still available if the user wants to change it
+- Back-press on detail activities no longer cancels a download — user must cancel via notification or the Cancel button
+- `AndroidManifest.xml`: added `BhDownloadService` declaration with `foregroundServiceType="dataSync"`, plus `FOREGROUND_SERVICE_DATA_SYNC` and `POST_NOTIFICATIONS` permissions
+#### Files touched
+- `extension/BhDownloadService.java` (new)
+- `extension/EpicGameDetailActivity.java`
+- `extension/GogGameDetailActivity.java`
+- `extension/AmazonGameDetailActivity.java`
+- `patches/AndroidManifest.xml`
+
+---
+
+### [stable] — v3.2.0 — Expanded config detail, Frontend Export, Beacon fixes (2026-04-24)
+**Commit:** `9b547e687`  |  **Tag:** v3.2.0  |  **CI:** ✅
+#### What changed
+- BH_VERSION bumped to 3.2.0
+- Includes: expanded config detail screen (pre1), Beacon orphan task fix (pre6), Frontend Export feature (pre7/8/9)
+#### Files touched
+- `extension/BhSettingsExporter.java` (BH_VERSION → 3.2.0)
+
+---
+
+### [fix] — v3.1.1-pre9 — Frontend Export: correct Steam App ID for catalog games (2026-04-24)
+**Commit:** `3001c6ab5`  |  **Tag:** v3.1.1-pre9  |  **CI:** run 24905687673 ✅
+#### What changed
+- `BhFrontendExportLambda.smali`: replaced `getId()` with `getSteamAppId()` for catalog game ID resolution
+- Root cause: `getId()` returns BannerHub's internal server catalog ID, not the Steam App ID; catalog games were writing the wrong number to the `.iso` file
+- ID resolution order: `getLocalGameId()` (non-null/non-empty) → imported game UUID; else `getSteamAppId()` → actual Steam App ID string
+- Confirmed working: catalog games now write correct Steam App ID; imported games continue to write their localGameId
+#### Files touched
+- `patches/smali/com/xj/landscape/launcher/ui/gamedetail/BhFrontendExportLambda.smali`
+
+---
+
+### [feat] — v3.1.1-pre7/pre8 — Frontend Export feature (2026-04-24)
+**Commits:** pre7 initial + pre8 localGameId priority fix  |  **Tags:** v3.1.1-pre7, v3.1.1-pre8  |  **CI:** ✅
+#### What changed
+- New "Frontend Export" option in PC game settings popup (alongside Import/Export Config)
+- Tapping shows a list of frontends; selecting Beacon writes `Downloads/bannerhub/frontend/Beacon/{gameName}.iso` containing the game's ID
+- `BhFrontendExportLambda.smali`: new synthetic lambda class wired into `GameDetailSettingMenu.W()` via smali injection
+- `extension/BhSettingsExporter.java`: added `showFrontendExportDialog()` and `exportForBeacon()` methods
+- `.github/workflows/build-quick.yml`: added third Option block in the settings menu injection
+#### Files touched
+- `patches/smali/com/xj/landscape/launcher/ui/gamedetail/BhFrontendExportLambda.smali` (new)
+- `extension/BhSettingsExporter.java`
+- `.github/workflows/build-quick.yml`
+
+---
+
+### [fix] — v3.1.1-pre6 — Beacon launch no longer shows 2nd BannerHub in recents (2026-04-24)
+**Commits:** `a9f2989` (pre5, finishAndRemoveTask attempt) + `fb2eab3` (pre6, manifest fix)  |  **Tag:** v3.1.1-pre6  |  **CI:** run 24902240605 ✅
+#### What changed
+- `patches/AndroidManifest.xml`: added `android:excludeFromRecents="true"` to `GameDetailActivity`
+- Root cause: Beacon launches `GameDetailActivity` with `FLAG_ACTIVITY_NEW_TASK` + `taskAffinity=""`, which always creates an isolated orphan task; that task was appearing as a second BannerHub instance in recents
+- Fix: since `GameDetailActivity` is always the root of that isolated task, `excludeFromRecents=true` tells Android to never register it in the recents list
+- Verified in logcat: task 7240 (GameDetailActivity) is never brought `moveTaskToFront` from recents; only task 7241 (WineActivity) appears
+- Note: smali `finishAndRemoveTask()` patch (pre4/pre5) was confirmed non-functional — the `t3()` code path is not reached during Beacon auto-launch; left in place but has no effect
+#### Files touched
+- `patches/AndroidManifest.xml`
+
+---
+
+### [feat] — v3.1.1-pre1 — Expanded config detail screen (2026-04-24)
+**Commit:** `c48dbb1` + reverts `7ba24bb` `1e96f09`  |  **Tag:** v3.1.1-pre1 (retagged)  |  **CI:** run 24895871530 ⏳
+**Note:** Tag recreated after reverting v3.1.1-pre and v3.1.1-pre2 fix commits — pre1 is now purely the config detail feature on top of v3.1.0.
+#### What changed
+- `BhGameConfigsActivity.fetchMeta()`: expanded meta card from 4 rows to up to 11
+- Now shows: Wine / Proton, DXVK, VKD3D, GPU Driver, FEXCore, Box64, Resolution, Command Line, Env Vars — in addition to existing Renderer, CPU, FPS Cap, BH Version, Settings count, Components count
+- Added `parseSettingName()` helper — parses nested JSON strings in settings values, prefers `name` field with fallback to `displayName`
+- Resolution key has a game-id suffix so it's found via prefix scan (`pc_s_resolution_w*`)
+- All new rows are conditional — only shown if the field is present and non-empty in the config
+#### Files touched
+- `extension/BhGameConfigsActivity.java`
+
+---
+
+### [docs] — GameHub 6.0 migration prep docs (2026-04-23)
+**Commit:** `1689aa7`  |  **Tag:** none
+**CI:** n/a (docs only, no build)
+#### What changed
+- Added 5 reference documents to prepare for eventual GameHub 6.0 (KMP) rebase
+- `migration/INJECTION_MAP.md` — maps all 150+ smali injection points by feature area
+- `migration/FEATURE_SPECS.md` — behavioral specs for all 56 BannerHub features; implementation-independent
+- `migration/GAMEHUB_6_ARCHITECTURE.md` — KMP/Compose Multiplatform smali patching guide; GameHub 6.0 not yet public as of 2026-04-23; biggest risk on release = R8 obfuscation
+- `migration/STANDALONE_FEASIBILITY.md` — feasibility analysis for extracting Component Manager and HUD Overlay as standalone apps (both feasible, ~2-3 weeks each)
+- `CLOUDFLARE_API_CONTRACT.md` — full API contract for community config Cloudflare Worker (11 endpoints, 7 version-specific risks flagged)
+#### Files touched
+- CLOUDFLARE_API_CONTRACT.md (new)
+- migration/FEATURE_SPECS.md (new)
+- migration/GAMEHUB_6_ARCHITECTURE.md (new)
+- migration/INJECTION_MAP.md (new)
+- migration/STANDALONE_FEASIBILITY.md (new)
+
+---
+
+### [pre] — v3.1.1-pre — Epic chunk silent truncation fix (2026-04-16)
+**Commit:** `2a02996f4`  |  **Tag:** v3.1.1-pre
+**CI:** pending
+#### What changed
+- Fix: Epic downloads could silently write partial chunk files when HTTP connection dropped mid-stream. The `n<=0` break in `downloadChunkStreaming` exited without error, chunk was counted as OK, then assembly crashed with `ArrayIndexOutOfBoundsException: length=<partial>; regionLength=1048576`. Now tracks `writtenBytes` during inflation and validates against `chunk.windowSize`; mismatch deletes partial file and retries next CDN.
+#### Files touched
+- extension/EpicDownloadManager.java (downloadChunkStreaming)
+
+---
+
 ### [feat] — PC-accurate XInput rumble with per-container settings (2026-04-17)
 **Commit:** pending  |  **Tag:** pending
 **Based on:** GameNative PR #1214 (Fix-Vibration, TideGear)
@@ -3678,3 +4202,22 @@ manifest download, install, launch, SDK cache + update checker.
 - "+ New" button creates subfolder via mkdir() + refreshes list
 - "Up" blocked at root level for each storage
 - Input validation: rejects blank names and names with slashes
+
+---
+
+### [stable] — v3.1.0 — Stable release (2026-04-14)
+**Tag:** v3.1.0  |  **Published:** 2026-04-14T21:13:10Z  |  **Author:** github-actions[bot]
+**URL:** https://github.com/The412Banner/BannerHub/releases/tag/v3.1.0
+
+#### What changed
+Promotes all v3.0.x pre-releases to stable. Bundles:
+- Full-screen game detail pages (GOG, Epic, Amazon) — cover art, HTML-stripped description, install size, release date, GOG community ratings
+- Update checker for all 3 stores — Check for Updates + Update Now buttons; baseline auto-sets on first check
+- DLC management for all 3 stores — list, install, uninstall individual DLCs from detail page
+- Cloud saves (GOG + Epic) — Browse folder picker (storage root dropdown + New Folder), Upload (newer-wins), Download; GOG uses game-scoped token; folder persists per-game
+- Epic Free Games redesign — dedicated full-screen FreeGamesActivity with cover art and claim flow
+
+#### APK variants
+BannerHub-v3.1.0-Normal.apk, Normal.GHL.apk, PuBG.apk, PuBG-CrossFire.apk, Genshin.apk, Ludashi.apk, AnTuTu.apk, alt-AnTuTu.apk, Original.apk
+
+

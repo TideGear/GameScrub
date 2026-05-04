@@ -66,6 +66,7 @@ public class GogGamesActivity extends Activity {
     private static final String CACHE_KEY = "gog_library_cache";
     private static final String VIEW_MODE_KEY = "view_mode";
     private static final int REQ_GAME_DETAIL = 1001;
+    private static final int REQ_DOWNLOADS   = 1002;
 
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private TextView syncText;
@@ -179,6 +180,25 @@ public class GogGamesActivity extends Activity {
         refreshBtn.setOnClickListener(v -> startSync(true));
         header.addView(refreshBtn, new LinearLayout.LayoutParams(-2, dp(40)));
 
+        Button dlBtn = new Button(this);
+        dlBtn.setText("⬇");
+        dlBtn.setTextColor(0xFFFFFFFF);
+        GradientDrawable dlBtnBg = new GradientDrawable();
+        dlBtnBg.setColor(0xFF333333);
+        dlBtnBg.setCornerRadius(dp(4));
+        dlBtn.setBackground(dlBtnBg);
+        dlBtn.setTextSize(16f);
+        dlBtn.setPadding(dp(12), 0, dp(12), 0);
+        dlBtn.setOnFocusChangeListener((v, hasFocus) -> {
+            dlBtnBg.setColor(hasFocus ? 0xFF555555 : 0xFF333333);
+            dlBtnBg.setStroke(hasFocus ? dp(2) : 0, hasFocus ? 0xFFFFD700 : 0x00000000);
+        });
+        dlBtn.setOnClickListener(v -> startActivityForResult(
+                new android.content.Intent(this, BhDownloadsActivity.class), REQ_DOWNLOADS));
+        LinearLayout.LayoutParams dlLp = new LinearLayout.LayoutParams(-2, dp(40));
+        dlLp.setMargins(dp(4), 0, 0, 0);
+        header.addView(dlBtn, dlLp);
+
         root.addView(header, new LinearLayout.LayoutParams(-1, -2));
 
         // Search bar
@@ -220,6 +240,31 @@ public class GogGamesActivity extends Activity {
 
         root.addView(scrollView, new LinearLayout.LayoutParams(-1, 0, 1f));
         setContentView(root);
+        hideSystemBars();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideSystemBars();
+    }
+
+    private void hideSystemBars() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            android.view.WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) {
+                c.hide(android.view.WindowInsets.Type.statusBars() | android.view.WindowInsets.Type.navigationBars());
+                c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN);
+        }
     }
 
     // ── Library sync (background thread) ─────────────────────────────────────
@@ -707,7 +752,7 @@ public class GogGamesActivity extends Activity {
                 pctTV.setText("0%");
                 pctTV.setVisibility(View.VISIBLE);
 
-                cancelRef1[0] = GogDownloadManager.startDownload(this, game, new GogDownloadManager.Callback() {
+                cancelRef1[0] = startViaServiceGog(game, new GogDownloadManager.Callback() {
                     @Override public void onProgress(String msg, int pct) {
                         uiHandler.post(() -> {
                             statusTV.setText(msg);
@@ -966,7 +1011,7 @@ public class GogGamesActivity extends Activity {
                 actionBtn.setBackgroundColor(0xFFCC3333);
                 progressBar.setVisibility(View.VISIBLE);
 
-                cancelRef2[0] = GogDownloadManager.startDownload(this, game, new GogDownloadManager.Callback() {
+                cancelRef2[0] = startViaServiceGog(game, new GogDownloadManager.Callback() {
                     @Override public void onProgress(String msg, int pct) {
                         uiHandler.post(() -> {
                             progressBar.setProgress(pct);
@@ -1097,8 +1142,9 @@ public class GogGamesActivity extends Activity {
             b.setNeutralButton("Uninstall", (d, w) -> {
                 String dirName = prefs.getString("gog_dir_" + game.gameId, null);
                 if (dirName != null) {
+                    android.app.AlertDialog progress = showUninstallProgress();
                     new Thread(() -> {
-                        java.io.File dir = GogInstallPath.getInstallDir(this, dirName);
+                        java.io.File dir = new java.io.File(dirName);
                         deleteDir(dir);
                         prefs.edit()
                                 .remove("gog_dir_" + game.gameId)
@@ -1106,6 +1152,7 @@ public class GogGamesActivity extends Activity {
                                 .remove("gog_cover_" + game.gameId)
                                 .apply();
                         uiHandler.post(() -> {
+                            progress.dismiss();
                             applyFilter(searchBar != null ? searchBar.getText().toString() : "");
                             Toast.makeText(this, game.title + " uninstalled", Toast.LENGTH_SHORT).show();
                         });
@@ -1146,14 +1193,14 @@ public class GogGamesActivity extends Activity {
                 statusTV.setText("0%  Starting…");
                 dialog.setCancelable(false);
 
-                cancelRef3[0] = GogDownloadManager.startDownload(this, game, new GogDownloadManager.Callback() {
+                cancelRef3[0] = startViaServiceGog(game, new GogDownloadManager.Callback() {
                     @Override public void onProgress(String msg, int pct) {
                         uiHandler.post(() -> {
                             progressBar.setProgress(pct);
                             statusTV.setText(pct + "%  " + msg);
                         });
                     }
-                    @Override public void onComplete(String exePath) {
+                    @Override public void onComplete(String installDir) {
                         uiHandler.post(() -> {
                             cancelRef3[0] = null;
                             progressBar.setProgress(100);
@@ -1163,7 +1210,8 @@ public class GogGamesActivity extends Activity {
                             customInstall.setEnabled(true);
                             dialog.setCancelable(true);
                             customInstall.setOnClickListener(vv -> {
-                                GogLaunchHelper.triggerLaunch(GogGamesActivity.this, exePath);
+                                String exe = prefs.getString("gog_exe_" + game.gameId, null);
+                                if (exe != null) GogLaunchHelper.triggerLaunch(GogGamesActivity.this, exe);
                                 dialog.dismiss();
                             });
                             // Rebuild grid to show ✓ on tile
@@ -1206,6 +1254,36 @@ public class GogGamesActivity extends Activity {
         b.show();
     }
 
+    // ── Service-backed download (routes through BhDownloadService) ───────────
+
+    private Runnable startViaServiceGog(GogGame game, GogDownloadManager.Callback cb) {
+        String dlKey = "gog_" + game.gameId;
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 0);
+        }
+        Intent svc = new Intent(this, BhDownloadService.class);
+        svc.setAction(BhDownloadService.ACTION_START);
+        svc.putExtra(BhDownloadService.EXTRA_STORE, "GOG");
+        svc.putExtra(BhDownloadService.EXTRA_GAME_ID, dlKey);
+        svc.putExtra(BhDownloadService.EXTRA_GAME_NAME, game.title);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_GAME_ID, game.gameId);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_TITLE, game.title);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_IMAGE_URL, game.imageUrl);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_DEVELOPER, game.developer);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_CATEGORY, game.category);
+        svc.putExtra(BhDownloadService.EXTRA_GOG_GENERATION, game.generation);
+        startForegroundService(svc);
+        BhDownloadService.addListener(dlKey, new BhDownloadService.DownloadListener() {
+            @Override public void onProgress(String msg, int pct) { cb.onProgress(msg, pct); }
+            @Override public void onComplete(String installDir)   { cb.onComplete(installDir); }
+            @Override public void onError(String msg)             { cb.onError(msg); }
+            @Override public void onCancelled()                   { cb.onCancelled(); }
+        });
+        return () -> BhDownloadService.cancel(GogGamesActivity.this, dlKey);
+    }
+
     // ── Full-screen detail ────────────────────────────────────────────────────
 
     private void openDetailScreen(GogGame game) {
@@ -1224,6 +1302,8 @@ public class GogGamesActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_GAME_DETAIL && resultCode == GogGameDetailActivity.RESULT_REFRESH) {
+            applyFilter(searchBar != null ? searchBar.getText().toString() : "");
+        } else if (requestCode == REQ_DOWNLOADS) {
             applyFilter(searchBar != null ? searchBar.getText().toString() : "");
         }
     }
@@ -1302,11 +1382,27 @@ public class GogGamesActivity extends Activity {
         b.show();
     }
 
+    private android.app.AlertDialog showUninstallProgress() {
+        android.widget.LinearLayout ll = new android.widget.LinearLayout(this);
+        ll.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        ll.setPadding(dp(24), dp(24), dp(24), dp(24));
+        ll.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        ll.addView(new android.widget.ProgressBar(this));
+        android.widget.TextView tv = new android.widget.TextView(this);
+        tv.setText("  Uninstalling…");
+        tv.setTextSize(16f);
+        ll.addView(tv);
+        android.app.AlertDialog d = new android.app.AlertDialog.Builder(this).setView(ll).setCancelable(false).create();
+        d.show();
+        return d;
+    }
+
     private void uninstall(GogGame game, Runnable onUninstalled) {
         String dirName = prefs.getString("gog_dir_" + game.gameId, null);
         if (dirName != null) {
+            android.app.AlertDialog progress = showUninstallProgress();
             new Thread(() -> {
-                java.io.File installPath = GogInstallPath.getInstallDir(this, dirName);
+                java.io.File installPath = new java.io.File(dirName);
                 deleteDir(installPath);
                 prefs.edit()
                         .remove("gog_dir_" + game.gameId)
@@ -1314,6 +1410,7 @@ public class GogGamesActivity extends Activity {
                         .remove("gog_cover_" + game.gameId)
                         .apply();
                 uiHandler.post(() -> {
+                    progress.dismiss();
                     onUninstalled.run();
                     Toast.makeText(this, game.title + " uninstalled", Toast.LENGTH_SHORT).show();
                 });

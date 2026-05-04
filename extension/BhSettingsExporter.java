@@ -8,6 +8,9 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.TypedValue;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONArray;
@@ -48,7 +51,7 @@ public class BhSettingsExporter {
     private static final String WORKER_BASE  =
             "https://bannerhub-configs-worker.the412banner.workers.dev";
 
-    static final String BH_VERSION = "3.1.0";
+    static final String BH_VERSION = "3.3.0";
 
     // ─── Export entry point ──────────────────────────────────────────────────
 
@@ -696,6 +699,80 @@ public class BhSettingsExporter {
             case "FEXCore": return 95;
             case "GPU":     return 10;
             default:        return 12;
+        }
+    }
+
+    // ─── Frontend Export ─────────────────────────────────────────────────────
+
+    public static void showFrontendExportDialog(Context ctx, String gameId, String gameName) {
+        String[] frontends = {"Beacon", "ES-DE"};
+        String basePath = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                .getAbsolutePath() + "/bannerhub/frontend/";
+
+        int px16 = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 16, ctx.getResources().getDisplayMetrics());
+        int px8  = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,  8, ctx.getResources().getDisplayMetrics());
+
+        LinearLayout titleLayout = new LinearLayout(ctx);
+        titleLayout.setOrientation(LinearLayout.VERTICAL);
+        titleLayout.setPadding(px16, px16, px16, px8);
+
+        TextView titleTV = new TextView(ctx);
+        titleTV.setText("Frontend Export — " + gameName);
+        titleTV.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        titleTV.setTypeface(titleTV.getTypeface(), android.graphics.Typeface.BOLD);
+        titleLayout.addView(titleTV);
+
+        TextView msgTV = new TextView(ctx);
+        msgTV.setText("Select a frontend. The output file will be saved to:\n\n" + basePath);
+        msgTV.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        msgTV.setPadding(0, px8, 0, 0);
+        titleLayout.addView(msgTV);
+
+        new AlertDialog.Builder(ctx)
+                .setCustomTitle(titleLayout)
+                .setItems(frontends, (dialog, which) -> {
+                    if (which == 0) exportForBeacon(ctx, gameId, gameName);
+                    else if (which == 1) exportForEsde(ctx, gameId, gameName);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private static void exportForBeacon(Context ctx, String gameId, String gameName) {
+        try {
+            File dir = new File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "bannerhub/frontend/Beacon");
+            dir.mkdirs();
+            String safeName = gameName.replaceAll("[\\\\/:*?\"<>|]", "_");
+            File out = new File(dir, safeName + ".iso");
+            FileWriter fw = new FileWriter(out);
+            fw.write(gameId);
+            fw.close();
+            new Handler(Looper.getMainLooper()).post(() ->
+                    Toast.makeText(ctx, "Beacon: saved " + out.getName(), Toast.LENGTH_SHORT).show());
+        } catch (Exception e) {
+            new Handler(Looper.getMainLooper()).post(() ->
+                    Toast.makeText(ctx, "Frontend export failed: " + e.getMessage(), Toast.LENGTH_LONG).show());
+        }
+    }
+
+    private static void exportForEsde(Context ctx, String gameId, String gameName) {
+        try {
+            File dir = new File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "bannerhub/frontend/ES-DE");
+            dir.mkdirs();
+            String safeName = gameName.replaceAll("[\\\\/:*?\"<>|]", "_");
+            File out = new File(dir, safeName + ".steam");
+            FileWriter fw = new FileWriter(out);
+            fw.write(gameId);
+            fw.close();
+            new Handler(Looper.getMainLooper()).post(() ->
+                    Toast.makeText(ctx, "ES-DE: saved " + out.getName(), Toast.LENGTH_SHORT).show());
+        } catch (Exception e) {
+            new Handler(Looper.getMainLooper()).post(() ->
+                    Toast.makeText(ctx, "Frontend export failed: " + e.getMessage(), Toast.LENGTH_LONG).show());
         }
     }
 }

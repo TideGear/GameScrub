@@ -54,6 +54,7 @@ public class AmazonGamesActivity extends Activity {
     private static final String CACHE_KEY    = "amazon_library_cache";
     private static final String VIEW_MODE_KEY = "amazon_view_mode";
     private static final int REQ_GAME_DETAIL  = 1001;
+    private static final int REQ_DOWNLOADS    = 1002;
 
     // Amazon brand colours
     private static final int COLOR_ACCENT   = 0xFFFF9900;   // orange — install btn / title
@@ -172,6 +173,25 @@ public class AmazonGamesActivity extends Activity {
         refreshBtn.setOnClickListener(v -> startSync(true));
         header.addView(refreshBtn, new LinearLayout.LayoutParams(-2, dp(40)));
 
+        Button dlBtn = new Button(this);
+        dlBtn.setText("⬇");
+        dlBtn.setTextColor(0xFFFFFFFF);
+        GradientDrawable dlBtnBg = new GradientDrawable();
+        dlBtnBg.setColor(0xFF333333);
+        dlBtnBg.setCornerRadius(dp(4));
+        dlBtn.setBackground(dlBtnBg);
+        dlBtn.setTextSize(16f);
+        dlBtn.setPadding(dp(12), 0, dp(12), 0);
+        dlBtn.setOnFocusChangeListener((v, hasFocus) -> {
+            dlBtnBg.setColor(hasFocus ? 0xFF555555 : 0xFF333333);
+            dlBtnBg.setStroke(hasFocus ? dp(2) : 0, hasFocus ? 0xFFFFD700 : 0x00000000);
+        });
+        dlBtn.setOnClickListener(v -> startActivityForResult(
+                new android.content.Intent(this, BhDownloadsActivity.class), REQ_DOWNLOADS));
+        LinearLayout.LayoutParams dlLp = new LinearLayout.LayoutParams(-2, dp(40));
+        dlLp.setMargins(dp(4), 0, 0, 0);
+        header.addView(dlBtn, dlLp);
+
         root.addView(header, new LinearLayout.LayoutParams(-1, -2));
 
         // Search bar
@@ -213,6 +233,31 @@ public class AmazonGamesActivity extends Activity {
 
         root.addView(scrollView, new LinearLayout.LayoutParams(-1, 0, 1f));
         setContentView(root);
+        hideSystemBars();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideSystemBars();
+    }
+
+    private void hideSystemBars() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            android.view.WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) {
+                c.hide(android.view.WindowInsets.Type.statusBars() | android.view.WindowInsets.Type.navigationBars());
+                c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN);
+        }
     }
 
     // ── Library sync ──────────────────────────────────────────────────────────
@@ -564,7 +609,7 @@ public class AmazonGamesActivity extends Activity {
                 pctTV.setText("0%");
                 pctTV.setVisibility(View.VISIBLE);
 
-                cancelRef[0] = startAmazonDownload(game, new DownloadCallback() {
+                cancelRef[0] = startViaServiceAmazon(game, new DownloadCallback() {
                     @Override public void onProgress(String msg, int pct) {
                         uiHandler.post(() -> {
                             statusTV.setText(msg);
@@ -781,7 +826,7 @@ public class AmazonGamesActivity extends Activity {
                 actionBtn.setBackgroundColor(COLOR_CANCEL);
                 progressBar.setVisibility(View.VISIBLE);
 
-                cancelRef[0] = startAmazonDownload(game, new DownloadCallback() {
+                cancelRef[0] = startViaServiceAmazon(game, new DownloadCallback() {
                     @Override public void onProgress(String msg, int pct) {
                         uiHandler.post(() -> progressBar.setProgress(pct));
                     }
@@ -853,6 +898,34 @@ public class AmazonGamesActivity extends Activity {
         return lp;
     }
 
+    // ── Service-backed download (routes through BhDownloadService) ───────────
+
+    private Runnable startViaServiceAmazon(AmazonGame game, DownloadCallback cb) {
+        String dlKey = "amazon_" + game.productId;
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 0);
+        }
+        Intent svc = new Intent(this, BhDownloadService.class);
+        svc.setAction(BhDownloadService.ACTION_START);
+        svc.putExtra(BhDownloadService.EXTRA_STORE, "AMAZON");
+        svc.putExtra(BhDownloadService.EXTRA_GAME_ID, dlKey);
+        svc.putExtra(BhDownloadService.EXTRA_GAME_NAME, game.title);
+        svc.putExtra(BhDownloadService.EXTRA_AMAZON_PRODUCT_ID, game.productId);
+        svc.putExtra(BhDownloadService.EXTRA_AMAZON_ENT_ID, game.entitlementId);
+        svc.putExtra(BhDownloadService.EXTRA_AMAZON_SKU, game.productSku);
+        svc.putExtra(BhDownloadService.EXTRA_AMAZON_TITLE, game.title);
+        startForegroundService(svc);
+        BhDownloadService.addListener(dlKey, new BhDownloadService.DownloadListener() {
+            @Override public void onProgress(String msg, int pct) { cb.onProgress(msg, pct); }
+            @Override public void onComplete(String installDir)   { cb.onComplete(installDir); }
+            @Override public void onError(String msg)             { cb.onError(msg); }
+            @Override public void onCancelled()                   { cb.onCancelled(); }
+        });
+        return () -> BhDownloadService.cancel(AmazonGamesActivity.this, dlKey);
+    }
+
     // ── Download wrapper ──────────────────────────────────────────────────────
 
     private interface DownloadCallback {
@@ -877,7 +950,7 @@ public class AmazonGamesActivity extends Activity {
 
             String sanitized = game.title.replaceAll("[^a-zA-Z0-9 \\-_]", "").trim();
             if (sanitized.isEmpty()) sanitized = "game_" + game.productId.hashCode();
-            File installDir = new File(new File(getFilesDir(), "Amazon"), sanitized);
+            File installDir = BhStoragePath.getInstallDir(this, "Amazon", sanitized);
 
             // Store install dir in prefs for uninstall
             prefs.edit().putString("amazon_dir_" + game.productId,
@@ -940,7 +1013,7 @@ public class AmazonGamesActivity extends Activity {
     private void showInstallConfirm(AmazonGame game, Runnable onConfirm) {
         long freeBytes = -1;
         try {
-            File base = new File(new File(getFilesDir(), "Amazon"), "_check");
+            File base = BhStoragePath.getInstallDir(this, "Amazon", "_check");
             File parent = base.getParentFile();
             if (parent != null) parent.mkdirs();
             android.os.StatFs sf = new android.os.StatFs(
@@ -1034,6 +1107,8 @@ public class AmazonGamesActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_GAME_DETAIL && resultCode == AmazonGameDetailActivity.RESULT_REFRESH) {
+            applyFilter(searchBar != null ? searchBar.getText().toString() : "");
+        } else if (requestCode == REQ_DOWNLOADS) {
             applyFilter(searchBar != null ? searchBar.getText().toString() : "");
         }
     }

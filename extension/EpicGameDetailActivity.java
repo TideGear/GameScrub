@@ -26,7 +26,6 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Full-screen game detail view for an Epic Games library entry.
@@ -49,7 +48,8 @@ public class EpicGameDetailActivity extends Activity {
     private String appName, title, description, developer, artCover, namespace, catalogItemId;
 
     private Button launchBtn, installBtn, setExeBtn, uninstallBtn;
-    private TextView exeNameTV, sizeTV;
+    private TextView exeNameTV, installPathTV, storageTypeBadgeTV, sizeTV;
+    private View installPathRow;
     private ProgressBar progressBar;
     private TextView progressLabel;
     private Runnable cancelDownload;
@@ -151,9 +151,34 @@ public class EpicGameDetailActivity extends Activity {
         scroll.addView(body);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
         setContentView(root);
+        hideSystemBars();
 
         refreshActionState();
         loadInstallSize();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideSystemBars();
+    }
+
+    private void hideSystemBars() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            android.view.WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) {
+                c.hide(android.view.WindowInsets.Type.statusBars() | android.view.WindowInsets.Type.navigationBars());
+                c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            getWindow().getDecorView().setSystemUiVisibility(
+                android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN);
+        }
     }
 
     private View makeInfoCard() {
@@ -192,8 +217,31 @@ public class EpicGameDetailActivity extends Activity {
         exeNameTV = new TextView(this);
         exeNameTV.setTextColor(0xFF888888);
         exeNameTV.setTextSize(12f);
-        exeNameTV.setPadding(0, 0, 0, dp(8));
+        exeNameTV.setPadding(0, 0, 0, dp(4));
         card.addView(exeNameTV);
+
+        LinearLayout pathRow = new LinearLayout(this);
+        pathRow.setOrientation(LinearLayout.HORIZONTAL);
+        pathRow.setGravity(Gravity.CENTER_VERTICAL);
+        pathRow.setPadding(0, 0, 0, dp(8));
+        pathRow.setVisibility(View.GONE);
+        installPathRow = pathRow;
+
+        installPathTV = new TextView(this);
+        installPathTV.setTextColor(0xFF666666);
+        installPathTV.setTextSize(11f);
+        LinearLayout.LayoutParams pathLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        pathLp.setMarginEnd(dp(6));
+        installPathTV.setLayoutParams(pathLp);
+        pathRow.addView(installPathTV);
+
+        storageTypeBadgeTV = new TextView(this);
+        storageTypeBadgeTV.setTextSize(10f);
+        storageTypeBadgeTV.setTypeface(null, Typeface.BOLD);
+        storageTypeBadgeTV.setPadding(dp(6), dp(2), dp(6), dp(2));
+        pathRow.addView(storageTypeBadgeTV);
+
+        card.addView(pathRow);
 
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
@@ -261,9 +309,40 @@ public class EpicGameDetailActivity extends Activity {
         return card;
     }
 
+    // ── Lifecycle — service reconnect ─────────────────────────────────────────
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (appName == null) return;
+        String dlKey = "epic_" + appName;
+        if (BhDownloadService.isActive(dlKey)) {
+            installBtn.setText("Cancel");
+            installBtn.setBackgroundColor(0xFFCC3333);
+            progressBar.setVisibility(View.VISIBLE);
+            progressLabel.setVisibility(View.VISIBLE);
+            launchBtn.setEnabled(false);
+            setExeBtn.setEnabled(false);
+            cancelDownload = () -> BhDownloadService.cancel(this, dlKey);
+            attachDownloadListener(dlKey);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (appName != null) BhDownloadService.removeListener("epic_" + appName);
+    }
+
     // ── Install ───────────────────────────────────────────────────────────────
 
     private void startInstall() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 0);
+        }
+        String dlKey = "epic_" + appName;
         installBtn.setText("Cancel");
         installBtn.setBackgroundColor(0xFFCC3333);
         progressBar.setVisibility(View.VISIBLE);
@@ -271,76 +350,35 @@ public class EpicGameDetailActivity extends Activity {
         launchBtn.setEnabled(false);
         setExeBtn.setEnabled(false);
 
-        AtomicBoolean cancelled = new AtomicBoolean(false);
-        cancelDownload = () -> cancelled.set(true);
+        cancelDownload = () -> BhDownloadService.cancel(this, dlKey);
+        attachDownloadListener(dlKey);
 
-        new Thread(() -> {
-            try {
-                String token = EpicCredentialStore.getValidAccessToken(this);
-                if (token == null) { onInstallError("Login required"); return; }
+        Intent svc = new Intent(this, BhDownloadService.class);
+        svc.setAction(BhDownloadService.ACTION_START);
+        svc.putExtra(BhDownloadService.EXTRA_STORE, "EPIC");
+        svc.putExtra(BhDownloadService.EXTRA_GAME_ID, dlKey);
+        svc.putExtra(BhDownloadService.EXTRA_GAME_NAME, title != null ? title : appName);
+        svc.putExtra(BhDownloadService.EXTRA_EPIC_NAMESPACE, namespace);
+        svc.putExtra(BhDownloadService.EXTRA_EPIC_CATALOG_ID, catalogItemId);
+        svc.putExtra(BhDownloadService.EXTRA_EPIC_APP_NAME, appName);
+        startForegroundService(svc);
+    }
 
-                uiHandler.post(() -> progressLabel.setText("Fetching manifest…"));
-                String manifestJson = EpicApiClient.getManifestApiJson(
-                        token, namespace, catalogItemId, appName);
-                if (manifestJson == null) {
-                    onInstallError("Failed to fetch manifest");
-                    return;
-                }
-
-                String sanitized = title != null
-                        ? title.replaceAll("[^a-zA-Z0-9 \\-_]", "").trim() : "";
-                if (sanitized.isEmpty()) sanitized = "epic_" + appName.hashCode();
-                File installDir = new File(new File(getFilesDir(), "epic_games"), sanitized);
-                prefs.edit().putString("epic_dir_" + appName, installDir.getAbsolutePath()).apply();
-
-                final String finalToken = token;
-                boolean ok = EpicDownloadManager.install(this, manifestJson, finalToken,
-                        installDir.getAbsolutePath(), (msg, pct) -> {
-                            if (cancelled.get()) return;
-                            uiHandler.post(() -> {
-                                progressBar.setProgress(pct);
-                                progressLabel.setText(msg);
-                            });
-                        });
-
-                if (cancelled.get()) { onInstallCancelled(); return; }
-                if (!ok) { onInstallError("Download failed"); return; }
-
-                // Store manifest version for update checker
-                try {
-                    String vid = new org.json.JSONObject(manifestJson).optString("versionId", "");
-                    if (!vid.isEmpty()) {
-                        prefs.edit().putString("epic_manifest_version_" + appName, vid).apply();
-                    }
-                } catch (Exception ignored) {}
-
-                List<File> exeFiles = new ArrayList<>();
-                AmazonLaunchHelper.collectExe(installDir, exeFiles);
-                if (exeFiles.isEmpty()) { onInstallError("No executable found"); return; }
-
-                String lowerTitle = title != null ? title.toLowerCase() : "";
-                Collections.sort(exeFiles, (a, b) ->
-                        AmazonLaunchHelper.scoreExe(b, lowerTitle)
-                        - AmazonLaunchHelper.scoreExe(a, lowerTitle));
-
-                if (exeFiles.size() == 1) {
-                    String path = exeFiles.get(0).getAbsolutePath();
-                    prefs.edit().putString("epic_exe_" + appName, path).apply();
-                    onInstallComplete();
-                } else {
-                    List<String> candidates = new ArrayList<>();
-                    for (File f : exeFiles) candidates.add(f.getAbsolutePath());
-                    showExePicker(candidates, selected -> {
-                        String chosen = (selected != null && !selected.isEmpty())
-                                ? selected : exeFiles.get(0).getAbsolutePath();
-                        prefs.edit().putString("epic_exe_" + appName, chosen).apply();
-                        onInstallComplete();
-                    });
-                }
-            } catch (Exception e) {
-                if (!cancelled.get()) onInstallError(e.getMessage() != null ? e.getMessage() : "Unknown error");
+    private void attachDownloadListener(String dlKey) {
+        BhDownloadService.addListener(dlKey, new BhDownloadService.DownloadListener() {
+            @Override public void onProgress(String msg, int pct) {
+                uiHandler.post(() -> { progressBar.setProgress(pct); progressLabel.setText(msg); });
             }
-        }, "epic-detail-dl-" + appName).start();
+            @Override public void onComplete(String installDir) {
+                uiHandler.post(EpicGameDetailActivity.this::onInstallComplete);
+            }
+            @Override public void onError(String msg) {
+                uiHandler.post(() -> onInstallError(msg));
+            }
+            @Override public void onCancelled() {
+                uiHandler.post(EpicGameDetailActivity.this::onInstallCancelled);
+            }
+        });
     }
 
     private void onInstallComplete() {
@@ -358,10 +396,8 @@ public class EpicGameDetailActivity extends Activity {
         uiHandler.post(() -> {
             progressBar.setVisibility(View.GONE);
             progressLabel.setVisibility(View.GONE);
-            installBtn.setText("Install");
             installBtn.setBackgroundColor(0xFF1A73E8);
-            launchBtn.setEnabled(true);
-            setExeBtn.setEnabled(true);
+            refreshActionState();
             Toast.makeText(this, "Error: " + msg, Toast.LENGTH_LONG).show();
         });
     }
@@ -371,14 +407,27 @@ public class EpicGameDetailActivity extends Activity {
         uiHandler.post(() -> {
             progressBar.setVisibility(View.GONE);
             progressLabel.setVisibility(View.GONE);
-            installBtn.setText("Install");
             installBtn.setBackgroundColor(0xFF1A73E8);
-            launchBtn.setEnabled(true);
-            setExeBtn.setEnabled(true);
+            refreshActionState();
         });
     }
 
     // ── Uninstall ─────────────────────────────────────────────────────────────
+
+    private AlertDialog showUninstallProgress() {
+        android.widget.LinearLayout ll = new android.widget.LinearLayout(this);
+        ll.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        ll.setPadding(dp(24), dp(24), dp(24), dp(24));
+        ll.setGravity(Gravity.CENTER_VERTICAL);
+        ll.addView(new android.widget.ProgressBar(this));
+        android.widget.TextView tv = new android.widget.TextView(this);
+        tv.setText("  Uninstalling…");
+        tv.setTextSize(16f);
+        ll.addView(tv);
+        AlertDialog d = new AlertDialog.Builder(this).setView(ll).setCancelable(false).create();
+        d.show();
+        return d;
+    }
 
     private void confirmUninstall() {
         new AlertDialog.Builder(this)
@@ -387,6 +436,7 @@ public class EpicGameDetailActivity extends Activity {
             .setPositiveButton("Uninstall", (d, w) -> {
                 String dir = prefs.getString("epic_dir_" + appName, null);
                 if (dir == null) return;
+                AlertDialog progress = showUninstallProgress();
                 new Thread(() -> {
                     deleteDir(new File(dir));
                     prefs.edit()
@@ -394,6 +444,7 @@ public class EpicGameDetailActivity extends Activity {
                         .remove("epic_dir_" + appName)
                         .apply();
                     uiHandler.post(() -> {
+                        progress.dismiss();
                         setResult(RESULT_REFRESH);
                         refreshActionState();
                         Toast.makeText(this, title + " uninstalled", Toast.LENGTH_SHORT).show();
@@ -406,6 +457,27 @@ public class EpicGameDetailActivity extends Activity {
 
     // ── State refresh ─────────────────────────────────────────────────────────
 
+    private void updateStorageBadge(String dir) {
+        if (installPathRow == null) return;
+        installPathTV.setText("Path: " + dir);
+        SharedPreferences sp = getSharedPreferences("steam_storage_pref", 0);
+        String sdPath = sp.getString("steam_storage_path", null);
+        boolean isSD = sdPath != null && !sdPath.isEmpty() && dir.startsWith(sdPath);
+        GradientDrawable badge = new GradientDrawable();
+        badge.setCornerRadius(dp(10));
+        if (isSD) {
+            badge.setColor(0xFF1B3A1B);
+            storageTypeBadgeTV.setTextColor(0xFF66BB6A);
+            storageTypeBadgeTV.setText("💾 SD Card");
+        } else {
+            badge.setColor(0xFF2A2A2A);
+            storageTypeBadgeTV.setTextColor(0xFF888888);
+            storageTypeBadgeTV.setText("📁 Internal");
+        }
+        storageTypeBadgeTV.setBackground(badge);
+        installPathRow.setVisibility(View.VISIBLE);
+    }
+
     private void refreshActionState() {
         if (exeNameTV == null) return;
         String exe = prefs.getString("epic_exe_" + appName, null);
@@ -414,6 +486,10 @@ public class EpicGameDetailActivity extends Activity {
 
         exeNameTV.setVisibility(installed ? View.VISIBLE : View.GONE);
         if (installed) exeNameTV.setText(".exe: " + new File(exe).getName());
+        if (installPathRow != null) {
+            if (dir != null) updateStorageBadge(dir);
+            else installPathRow.setVisibility(View.GONE);
+        }
 
         launchBtn.setVisibility(installed ? View.VISIBLE : View.GONE);
         installBtn.setVisibility(installed ? View.GONE : View.VISIBLE);

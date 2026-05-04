@@ -4754,3 +4754,18 @@ GOG-3, EPIC-4, AMAZON-2 first implementation. DLC detection happens during libra
 - GOG cloud saves use regular access_token (no game-scoped token in v1 implementation)
 - Epic `expires_at` prefs key confirmed from `EpicCredentialStore.java` (not `epic_expires_at`)
 - Upload/download buttons disabled until save folder is set via FolderPickerActivity
+
+
+---
+
+### Entry #13 — v3.1.1-pre — Epic chunk silent truncation fix (2026-04-16)
+**Commit:** `2a02996f4`  |  **Tag:** v3.1.1-pre  |  **CI:** pending
+
+#### Files
+- `extension/EpicDownloadManager.java` — `downloadChunkStreaming()`: track `writtenBytes` in both zlib and uncompressed paths; after inner try-with-resources, validate `writtenRef[0] == chunk.windowSize` (when windowSize > 0); on mismatch: `outFile.delete()` + `continue` to next CDN
+
+#### Root cause analysis
+`downloadChunkStreaming` used `if (n <= 0) break` in the inflation loop. On network drop mid-stream, `in.read()` returns -1, the break exits silently, and the partial file is written. The drain loop produces nothing (inflater has no more input). The function returns `true`, incrementing `completedCount`. During file assembly, `bos.write(chunkData, part.offset, part.size)` throws `ArrayIndexOutOfBoundsException` because `chunkData.length` < `part.size` (e.g., 120859 vs 1048576).
+
+Fix: added `long writtenBytes` counter in both paths. After the inner try-with-resources block, `writtenRef[0]` is checked against `chunk.windowSize` (populated from binary manifest's ChunkDataList). Mismatch → delete partial file + retry CDN. Reported game: "The Stone of Madness".
+**CI:** v3.1.1-pre triggered

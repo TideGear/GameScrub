@@ -40,10 +40,45 @@
 
 # ── onCreate ───────────────────────────────────────────────────────────────────
 .method protected onCreate(Landroid/os/Bundle;)V
-    .locals 0
+    .locals 3
     invoke-super {p0, p1}, Landroidx/appcompat/app/AppCompatActivity;->onCreate(Landroid/os/Bundle;)V
     invoke-virtual {p0}, Lcom/xj/landscape/launcher/ui/menu/ComponentManagerActivity;->buildUI()V
     invoke-virtual {p0}, Lcom/xj/landscape/launcher/ui/menu/ComponentManagerActivity;->showComponents()V
+    invoke-virtual {p0}, Landroid/app/Activity;->getWindow()Landroid/view/Window;
+    move-result-object v0
+    invoke-virtual {v0}, Landroid/view/Window;->getInsetsController()Landroid/view/WindowInsetsController;
+    move-result-object v0
+    if-eqz v0, :cond_skip
+    invoke-static {}, Landroid/view/WindowInsets$Type;->statusBars()I
+    move-result v1
+    invoke-static {}, Landroid/view/WindowInsets$Type;->navigationBars()I
+    move-result v2
+    or-int/2addr v1, v2
+    invoke-interface {v0, v1}, Landroid/view/WindowInsetsController;->hide(I)V
+    const/4 v1, 0x2
+    invoke-interface {v0, v1}, Landroid/view/WindowInsetsController;->setSystemBarsBehavior(I)V
+    :cond_skip
+    return-void
+.end method
+
+.method public onWindowFocusChanged(Z)V
+    .locals 3
+    invoke-super {p0, p1}, Landroidx/appcompat/app/AppCompatActivity;->onWindowFocusChanged(Z)V
+    if-eqz p1, :cond_no_focus
+    invoke-virtual {p0}, Landroid/app/Activity;->getWindow()Landroid/view/Window;
+    move-result-object v0
+    invoke-virtual {v0}, Landroid/view/Window;->getInsetsController()Landroid/view/WindowInsetsController;
+    move-result-object v0
+    if-eqz v0, :cond_no_focus
+    invoke-static {}, Landroid/view/WindowInsets$Type;->statusBars()I
+    move-result v1
+    invoke-static {}, Landroid/view/WindowInsets$Type;->navigationBars()I
+    move-result v2
+    or-int/2addr v1, v2
+    invoke-interface {v0, v1}, Landroid/view/WindowInsetsController;->hide(I)V
+    const/4 v1, 0x2
+    invoke-interface {v0, v1}, Landroid/view/WindowInsetsController;->setSystemBarsBehavior(I)V
+    :cond_no_focus
     return-void
 .end method
 

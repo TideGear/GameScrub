@@ -2,8 +2,10 @@
 
 > **Credit:** This document and the BannerHub Amazon Games integration would not exist without the hard work of [The GameNative Team](https://github.com/utkarshdalal/GameNative). All API research, PKCE authentication flow design, manifest.proto format documentation, FuelPump environment variables, SDK DLL deployment, and download pipeline architecture documented here is derived from their open-source work. Thank you.
 
+> **Also ported to:** The Amazon integration documented here was also ported to the [Star Bionic project](https://github.com/jacojayy/star) beginning April 14, 2026.
+
 > Source: https://github.com/utkarshdalal/GameNative
-> Updated: 2026-03-29
+> Updated: 2026-04-16
 > Purpose: BannerHub smali integration reference
 
 ---
@@ -984,10 +986,10 @@ From the full PR body (auto-summarized by cubic + CodeRabbit, plus manual body):
 
 ---
 
-## 25. What Is NOT Implemented
+## 25. What Is NOT Implemented (GameNative)
 
 - Delta/patch updates (full re-download; Nile has scaffolding, not wired in GameNative)
-- DLC handling
+- DLC handling (GameNative — BannerHub adds a UI section; see §28)
 - Cloud saves (no known Amazon API)
 - Prime Gaming free game claiming (purchased/owned only)
 
@@ -1036,3 +1038,120 @@ From the full PR body (auto-summarized by cubic + CodeRabbit, plus manual body):
 - No exchange token call; no extra launch args
 - fuel.json handles most games; heuristic catches rest
 - No `-epicapp` style args
+
+---
+
+## 27. BannerHub: Full-Screen Game Detail Activity
+
+File: `extension/AmazonGameDetailActivity.java`
+
+Launched via `startActivityForResult` from `AmazonGamesActivity`.
+
+### Intent extras
+
+| Extra | Type | Description |
+|---|---|---|
+| `product_id` | String | Amazon product ID (`amzn1.adg.product.XXXX`) |
+| `entitlement_id` | String | Entitlement UUID (used for GetGameDownload) |
+| `title` | String | Game display name |
+| `art_url` | String | Square/icon art URL |
+| `hero_url` | String | Hero/background art URL |
+| `developer` | String | Developer name |
+| `publisher` | String | Publisher name |
+| `description` | String | Short description (may contain HTML) |
+
+### Layout sections
+
+1. **GAME INFO** — developer, publisher, release date (from `amazon_release_{productId}` pref),
+   install size (fetched async), description (HTML-stripped, truncated to 400 chars)
+2. **ACTIONS** — exe path display, progress bar + label, Launch / Install / Cancel / Set .exe /
+   Uninstall buttons; state driven by `amazon_installed_{productId}` pref
+3. **UPDATES** — stored version label, Check for Updates / Update Now buttons; see §28
+4. **DLC** — see §29
+
+### HTML stripping
+
+```java
+String plain = Html.fromHtml(description, Html.FROM_HTML_MODE_COMPACT).toString().trim();
+String desc = plain.length() > 400 ? plain.substring(0, 400) + "…" : plain;
+```
+
+### Install size
+
+Async fetch via `AmazonApiClient.getGameDownload(token, entitlementId)` → parse manifest.proto
+→ `manifest.totalInstallSize`. Displayed in the info card.
+
+---
+
+## 28. BannerHub: Update Checker
+
+File: `extension/AmazonGameDetailActivity.java` (`doCheckUpdate()`)
+
+### Design decision
+
+`GetLiveVersionIds` (the dedicated update check endpoint) is **unreliable** in practice —
+it sometimes returns stale data. BannerHub uses `GetGameDownload` instead, which is the same
+call made before installing/downloading and always returns the current `versionId`.
+
+### API call
+
+```
+POST https://gaming.amazon.com/api/distribution/v2/public
+X-Amz-Target: com.amazon.animusdistributionservice.external.AnimusDistributionService.GetGameDownload
+x-amzn-token: {accessToken}
+Content-Encoding: amz-1.0
+User-Agent: com.amazon.agslauncher.win/3.0.9202.1
+Content-Type: application/json
+
+{ "entitlementId": "{UUID}", "Operation": "GetGameDownload" }
+```
+
+Response: `{ "downloadUrl": "...", "versionId": "..." }` — same `GameDownloadSpec` as used
+by `AmazonDownloadManager`. The `versionId` field is the version string to compare.
+
+### Storage and comparison
+
+```
+bh_amazon_prefs key:  amazon_manifest_version_{productId}  (String)
+```
+
+- No stored value: save `versionId` as baseline, display "Up to date ✓"
+- Stored == latest: "Up to date ✓"
+- Stored != latest: "Update available!\nInstalled: v{stored[0..12]}…  →  Latest: v{latest[0..12]}…"
+  with "Update Now" button visible
+
+Tapping "Update Now" triggers re-download of the game into the existing install path.
+
+### UI guard
+
+Shows "Install the game first to check for updates." if `amazon_installed_{productId}` is false.
+Check and Update buttons are hidden in that state.
+
+### Token handling
+
+Uses `AmazonCredentialStore.getValidAccessToken(ctx)` which auto-refreshes 5 minutes before
+expiry. Returns null if not logged in, which is surfaced as "Login required." in the UI.
+
+---
+
+## 29. BannerHub: DLC Management
+
+The DLC section appears in `AmazonGameDetailActivity`. Amazon's `GetEntitlements` API returns
+all entitled products including DLC in the same list.
+
+### DLC identification
+
+Amazon does not have an explicit `isDLC` field in the entitlements response — DLCs are
+identified heuristically:
+- Product title contains known DLC keywords (e.g. "DLC", "Season Pass", "Expansion")
+- OR the product's SKU associates it with a base game SKU
+
+In practice for BannerHub, the DLC section displays any additional entitlements associated
+with a base game, filtered from the full library list in `bh_amazon_prefs`.
+
+### DLC install
+
+DLCs bundled with a base game are included automatically when downloading — Amazon's
+`manifest.proto` contains all required files for the full entitlement (base + DLC) in a
+single download spec. There is no separate DLC download step: `GetGameDownload` for the
+base game's `entitlementId` includes all associated DLC file lists in the manifest packages.
