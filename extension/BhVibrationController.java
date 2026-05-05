@@ -361,21 +361,33 @@ public final class BhVibrationController {
     /**
      * Called from the smali patch on GamepadDevice$Physical.g()V — fires
      * whenever stock GameHub's GamepadDevice.f(II)V routes a (0, 0) rumble
-     * to the stop path. Clears our keepalive entry for this device so the
-     * keepalive runnable doesn't refresh stale non-zero values.
+     * to the stop path.
      *
-     * Stock g()'s per-vibrator cancel handles the actual motor stop. We just
-     * need to update our bookkeeping so the keepalive thread agrees.
+     * Three things happen here, in order:
+     *   1. Clear our controllerKeepalive entry so the 1.5 s keepalive runnable
+     *      stops re-firing the cached non-zero values.
+     *   2. Reset the slotLow/slotHigh device-side aggregation arrays.
+     *   3. Issue the supersede pattern (1 ms minimum-amplitude vm.vibrate())
+     *      to halt the in-flight VibrationEffect immediately. Stock g()'s
+     *      per-vibrator cancel runs right after our hook returns, but on
+     *      Samsung's Vibrator HAL for InputDevice vibrators, cancel() does
+     *      NOT reliably halt the BT-HID effect already uploaded to the
+     *      controller — it keeps running until the createOneShot duration
+     *      naturally expires (2 s in our case). vm.vibrate() reliably
+     *      supersedes (proven empirically by tap-to-switch-motors behavior),
+     *      so we replace the active 2 s effect with a 1 ms minimum pulse
+     *      that ends almost immediately, leaving motors silent.
      */
     private void handleStop(int deviceId) {
         Log.i(TAG, "STOP-G dev=" + deviceId);
         recordKeepalive(deviceId, 0, 0);
-        // Reset device-side aggregation too — same logic.
         for (int i = 0; i < MAX_SLOTS; i++) {
             slotLow[i] = 0;
             slotHigh[i] = 0;
         }
         deviceActive = false;
+        // Issue supersede AHEAD of stock g()'s per-vibrator cancel.
+        stopController(deviceId);
     }
 
     /**
