@@ -11,7 +11,9 @@ add_library(evshim SHARED evshim.c)
 # Internal helpers are already `static` so they don't leak.
 target_compile_options(evshim PRIVATE -O2 -Wall -Wextra -fPIC)
 
-target_link_libraries(evshim PRIVATE dl pthread)
+# pthread is part of bionic libc on Android — no separate libpthread to link.
+# dl is a real lib we need for dlsym/RTLD_NEXT.
+target_link_libraries(evshim PRIVATE dl)
 
 set_target_properties(evshim PROPERTIES
     LINK_FLAGS "-Wl,--as-needed"
