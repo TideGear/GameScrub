@@ -64,7 +64,8 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           echo "Build version: $VERSION"
-          sed -i "s/^  versionName: .*/  versionName: $VERSION/" apktool_out_base/apktool.yml
+          # Use | as sed delimiter so branch names containing / (e.g. fix/foo) don't break the s/// expression.
+          sed -i "s|^  versionName: .*|  versionName: $VERSION|" apktool_out_base/apktool.yml
           echo "versionName -> $VERSION"
 
       - name: Patch AppUtils phone-home version
