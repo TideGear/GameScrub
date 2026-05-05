@@ -141,7 +141,9 @@ static void *keepalive_thread(void *arg)
 
 static void start_keepalive(void)
 {
-    if (pthread_create(&g_keepalive_tid, NULL, keepalive_thread, NULL) == 0) {
+    int rc = pthread_create(&g_keepalive_tid, NULL, keepalive_thread, NULL);
+    LOG("pthread_create rc=%d (0=ok)\n", rc);
+    if (rc == 0) {
         pthread_detach(g_keepalive_tid);
     } else {
         LOG("pthread_create failed: %s\n", strerror(errno));
@@ -153,8 +155,20 @@ static void start_keepalive(void)
 int SDL_JoystickRumble(SDL_Joystick *js, uint16_t low_freq, uint16_t high_freq,
                        uint32_t duration_ms)
 {
+    /* Trace the first few calls so we can prove interposition is happening
+     * (and via which thread). */
+    static int s_diag_count = 0;
+    if (s_diag_count < 6) {
+        LOG("SDL_JoystickRumble call#%d: js=%p low=%u high=%u dur=%ums\n",
+            s_diag_count, (void *)js, low_freq, high_freq, duration_ms);
+        s_diag_count++;
+    }
+
     resolve_real();
-    if (!real_SDL_JoystickRumble) return -1;
+    if (!real_SDL_JoystickRumble) {
+        LOG("real SDL_JoystickRumble not found via dlsym(RTLD_NEXT)\n");
+        return -1;
+    }
 
     /* Lazy-start the keepalive thread on the first rumble call so the
      * thread doesn't run in Wine processes that never touch a controller. */
@@ -201,4 +215,6 @@ static void evshim_ctor(void)
     LOG("loaded (MAX_SLOTS=%d, interval=%dms, duration=%dms)\n",
         MAX_SLOTS, KEEPALIVE_INTERVAL_US / 1000, KEEPALIVE_DURATION_MS);
     resolve_real();
+    LOG("ctor resolved real_SDL_JoystickRumble=%p real_SDL_JoystickClose=%p\n",
+        (void *)real_SDL_JoystickRumble, (void *)real_SDL_JoystickClose);
 }
