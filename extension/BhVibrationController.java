@@ -277,6 +277,25 @@ public final class BhVibrationController {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Smali entry 3: GamepadDevice$Physical.g(). Stock GameHub's
+    // GamepadDevice.f(II)V routes (0,0) -> g() (stop) and non-zero -> h(II)V
+    // (dispatch). Our Patch 2 hooks h(II)V only, so (0,0) bypasses our handler
+    // and our controllerKeepalive map is never cleared — keepalive runnable
+    // re-fires the cached non-zero values every 1500 ms forever.
+    //
+    // Patch 7 hooks g()V to call onStop(deviceId) so we can clear the
+    // keepalive entry. Stock g() then continues with its per-vibrator cancel
+    // immediately after we return; we don't replace it.
+    // ─────────────────────────────────────────────────────────────────────────
+    public static void onStop(int deviceId) {
+        try {
+            getInstance().handleStop(deviceId);
+        } catch (Throwable t) {
+            Log.w(TAG, "onStop failed", t);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Core logic
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -337,6 +356,26 @@ public final class BhVibrationController {
         dispatchControllerInternal(dev, low, high, /*log*/ true);
         recordKeepalive(deviceId, low, high);
         return true;
+    }
+
+    /**
+     * Called from the smali patch on GamepadDevice$Physical.g()V — fires
+     * whenever stock GameHub's GamepadDevice.f(II)V routes a (0, 0) rumble
+     * to the stop path. Clears our keepalive entry for this device so the
+     * keepalive runnable doesn't refresh stale non-zero values.
+     *
+     * Stock g()'s per-vibrator cancel handles the actual motor stop. We just
+     * need to update our bookkeeping so the keepalive thread agrees.
+     */
+    private void handleStop(int deviceId) {
+        Log.i(TAG, "STOP-G dev=" + deviceId);
+        recordKeepalive(deviceId, 0, 0);
+        // Reset device-side aggregation too — same logic.
+        for (int i = 0; i < MAX_SLOTS; i++) {
+            slotLow[i] = 0;
+            slotHigh[i] = 0;
+        }
+        deviceActive = false;
     }
 
     /**
@@ -467,15 +506,38 @@ public final class BhVibrationController {
                 VibratorManager vm = dev.getVibratorManager();
                 if (vm != null) {
                     int[] ids = vm.getVibratorIds();
-                    Log.i(TAG, "STOP dev=" + deviceId + " vm.cancel() ids="
-                            + (ids == null ? "null" : java.util.Arrays.toString(ids)));
+                    if (ids != null && ids.length > 0) {
+                        // Force-stop pattern: vm.cancel() alone does NOT reliably
+                        // halt in-flight BT-HID rumble on Samsung's Vibrator HAL
+                        // for InputDevice vibrators. But vibrate() always supersedes
+                        // (proven empirically: tapping a different motor halts the
+                        // previous one). Issue a 1ms minimum-amplitude pulse on
+                        // every motor to replace whatever's running, then cancel
+                        // for belt-and-suspenders.
+                        CombinedVibration.ParallelCombination p = CombinedVibration.startParallel();
+                        for (int id : ids) {
+                            p.addVibrator(id, VibrationEffect.createOneShot(1L, 1));
+                        }
+                        VibrationAttributes attrs = buildAttrs();
+                        if (attrs != null) {
+                            vm.vibrate(p.combine(), attrs);
+                        } else {
+                            vm.vibrate(p.combine());
+                        }
+                        vm.cancel();
+                        Log.i(TAG, "STOP dev=" + deviceId + " supersede+cancel ids="
+                                + java.util.Arrays.toString(ids));
+                        return;
+                    }
+                    Log.i(TAG, "STOP dev=" + deviceId + " vm has no vibrator ids; cancel()");
                     vm.cancel();
                     return;
                 }
             }
             Vibrator v = dev.getVibrator();
             if (v != null) {
-                Log.i(TAG, "STOP dev=" + deviceId + " v.cancel() (single vibrator)");
+                Log.i(TAG, "STOP dev=" + deviceId + " single-vibrator supersede+cancel");
+                try { v.vibrate(VibrationEffect.createOneShot(1L, 1)); } catch (Throwable ignored) {}
                 v.cancel();
             } else {
                 Log.i(TAG, "STOP dev=" + deviceId + " no Vibrator/VibratorManager");
