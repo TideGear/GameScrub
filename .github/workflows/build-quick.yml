@@ -678,6 +678,6 @@ jobs:
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BannerHub-pre-${{ github.ref_name }}
+          name: BannerHub-pre-${{ replace(github.ref_name, '/', '-') }}
           path: BannerHub-*.apk
           retention-days: 30
