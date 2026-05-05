@@ -311,17 +311,20 @@ public final class BhVibrationController {
 
     private boolean handleControllerDispatch(int deviceId, int lowRaw, int highRaw) {
         int mode = cachedMode;
+        int low = lowRaw & 0xFFFF;
+        int high = highRaw & 0xFFFF;
+        Log.i(TAG, "DISPATCH dev=" + deviceId + " mode=" + mode
+                + " low=" + low + " high=" + high);
+
         if (mode == MODE_OFF || mode == MODE_DEVICE) {
             // Controller should stay silent. Stop any active rumble on this device.
             stopController(deviceId);
             return true;
         }
 
-        int low = lowRaw & 0xFFFF;
-        int high = highRaw & 0xFFFF;
-
         InputDevice dev = InputDevice.getDevice(deviceId);
         if (dev == null) {
+            Log.i(TAG, "DISPATCH dev=" + deviceId + " InputDevice.getDevice -> null, fallthrough");
             return false; // let stock code try (won't find anything, but no harm)
         }
 
@@ -455,18 +458,31 @@ public final class BhVibrationController {
 
     private void stopController(int deviceId) {
         InputDevice dev = InputDevice.getDevice(deviceId);
-        if (dev == null) return;
+        if (dev == null) {
+            Log.i(TAG, "STOP dev=" + deviceId + " InputDevice null");
+            return;
+        }
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 VibratorManager vm = dev.getVibratorManager();
                 if (vm != null) {
+                    int[] ids = vm.getVibratorIds();
+                    Log.i(TAG, "STOP dev=" + deviceId + " vm.cancel() ids="
+                            + (ids == null ? "null" : java.util.Arrays.toString(ids)));
                     vm.cancel();
                     return;
                 }
             }
             Vibrator v = dev.getVibrator();
-            if (v != null) v.cancel();
-        } catch (Throwable ignored) { }
+            if (v != null) {
+                Log.i(TAG, "STOP dev=" + deviceId + " v.cancel() (single vibrator)");
+                v.cancel();
+            } else {
+                Log.i(TAG, "STOP dev=" + deviceId + " no Vibrator/VibratorManager");
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "STOP dev=" + deviceId + " threw", t);
+        }
     }
 
     private void recordKeepalive(int deviceId, int low, int high) {
