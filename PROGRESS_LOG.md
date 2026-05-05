@@ -4,10 +4,45 @@ Tracks every commit, patch, and change applied to the GameHub 5.3.5 ReVanced APK
 
 ---
 
+### [feat] — libevshim.so guest-side SDL keepalive (2026-05-04)
+**Commit:** pending
+**Bug:** Wine games' rumble path inside the imagefs is `XInput → winebus.so → SDL_JoystickRumble → libvfs.so's VirtualJoystickDesc.Rumble callback → AF_UNIX winemu socket → host`. SDL2 inside Wine auto-expires rumble ~1000 ms after each `SDL_JoystickRumble` call by re-invoking the Rumble callback with `(0, 0)`. The host treats that as "rumble stopped" and cancels the motors; sustained rumble cuts out at exactly 1 s.
+**Why this fix can't be done host-side:** the bbada64 attempt (now reverted) suppressed `(0, 0)` arrivals at `BhVibrationController.handleRumble` within a 950–1050 ms window. Worked for the symptom but produced indefinitely stuck rumble: after SDL auto-expiry, Wine's xinput→SDL layer sees SDL as already stopped and never re-issues the game's continuing held-trigger state. The host receives one `(0,0)` per session and that's it. No off-ramp.
+#### Reverse-engineering notes
+Traced the bridge by pulling the imagefs from the device:
+- `/data/data/com.tencent.ig/files/usr/lib/libSDL2-2.0.so` — stock-ish SDL2; references `/dev/input/event*` paths but Wine uses it via virtual joysticks here.
+- `/data/data/com.tencent.ig/files/usr/opt/wine_proton10.0-arm64x-2/.../winebus.so` — full `SDL_Joystick*` import set including `SDL_JoystickRumble`. This is Wine's HID bus driver; calls SDL with the rumble request when XInput state changes.
+- `lib/arm64-v8a/libvfs.so` (host APK side, LD_PRELOAD'd into Wine via `EnvironmentController`) — Tencent's `WinEmuKernel/lib/src/main/cpp/vfs/src/sdl/{gamepad_client,gamepad_manager,sdl_loader}.cpp`. Calls `SDL_JoystickAttachVirtualEx` per slot with a Rumble callback that sends `MessageHeader` IPC messages over the `winemu` AF_UNIX socket to the host's `winemu::GamepadServer` in `libwinemu.so`.
+- Live env confirms: wineserver process has `GAMEPAD_SOCK_PATH=/data/user/0/com.tencent.ig/files/usr/.gamepad.sock` set.
+- This is essentially the same SDL VirtualJoystick + Rumble-callback bridge GameNative uses; only the host-side IPC framing differs. PR #1214's evshim approach drops in cleanly with the gamepad.mem write removed (libvfs.so already sends the IPC).
+#### What changed
+- New native shim `native/evshim/evshim.c` (~150 LOC) interposing `SDL_JoystickRumble` and `SDL_JoystickClose` via `LD_PRELOAD`. A 500 ms keepalive thread re-issues each non-zero slot's last values with a 2000 ms duration so SDL's internal ~1 s expiry never fires. Real game-driven `(0, 0)` calls clear the slot so keepalive stops re-firing. `SDL_JoystickClose` evicts stale handles.
+- New `native/evshim/CMakeLists.txt` for NDK arm64-v8a build.
+- New CI step `Build libevshim.so (guest-side SDL keepalive)` in both `build.yml` and `build-quick.yml`: locates Android NDK, installs ninja if missing, runs `cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -G Ninja`, drops output into `apktool_out{,_base}/lib/arm64-v8a/libevshim.so` so apktool packages it.
+- Patch 6 added to the existing `Apply BhVibration smali patches` step (both YAMLs): patches `EnvironmentController.b(Wine, String)V` to prepend `<nativeLibraryDir>/libevshim.so` to the `LD_PRELOAD` list at the existing `EnvVars.f("LD_PRELOAD", v1)` site (line 465 of `smali_classes6/com/winemu/core/controller/EnvironmentController.smali`). Includes a runtime `File.exists()` guard so absence of the .so doesn't break existing entries.
+#### Why this design
+With the shim active, Wine processes load `libevshim.so` first via `LD_PRELOAD`. When `winebus.so` calls `SDL_JoystickRumble`, the dynamic linker resolves to our wrapper → records `(low, high)` per `SDL_Joystick*` → calls real `SDL_JoystickRumble` via `dlsym(RTLD_NEXT, ...)`. SDL fires `libvfs.so`'s registered Rumble callback → IPC to host → motors run. Every 500 ms our keepalive thread calls real `SDL_JoystickRumble` again with the recorded values and a 2 s duration; SDL's expiry timer is reset before it can fire. When the game stops with `(0, 0)`, the slot is cleared and keepalive stops re-firing. Real game-driven release works normally.
+#### Verification plan
+- After install, sustained rumble should run smoothly for any duration the player holds a trigger; no 1-second cutoff.
+- The existing `[SDL_AUTO_EXPIRY?]` host-side diagnostic (kept in place as a verification hook) should stop tagging arrivals — if SDL never auto-expires, the host never sees the spurious 1000 ms `(0,0)`.
+- `adb logcat | grep evshim` should show `[evshim] loaded` and `[evshim] keepalive thread running` lines from the Wine process stderr.
+#### Files touched
+- `native/evshim/evshim.c` (new) — keepalive shim
+- `native/evshim/CMakeLists.txt` (new) — NDK build
+- `.github/workflows/build.yml` — NDK build step + Patch 6
+- `.github/workflows/build-quick.yml` — same
+#### Risk / known limits
+- LD_PRELOAD relies on dynamic-link symbol interposition. If `winebus.so` were to use `dlopen(libSDL2, RTLD_LOCAL)` + private `dlsym`, our wrapper would be bypassed. From the import table it appears to use a normal NEEDED dependency, so interposition holds.
+- Keepalive is per-process. Each Wine guest process gets its own thread on first rumble call — no cost when no controller is in use (lazy `pthread_once`).
+- Race window: a real `(0,0)` stop can race a keepalive tick already in flight; worst case is one extra `(low,high)` frame followed by the real stop, ~10 ms of bonus rumble. Acceptable.
+
+---
+
 ### [diag] — SDL auto-expiry trace in BhVibrationController (2026-05-04)
 **Commit:** pending
-#### Why
-Investigating whether GameNative PR #1214's `evshim`-based SDL keepalive applies to BannerHub. Architectural review of `libwinemu.so` (Tencent's `winemu::GamepadServer`) found GameHub's gamepad bridge is an AF_UNIX IPC socket named `winemu` carrying `MessageHeader`-framed messages — *not* the `gamepad.mem` shared-memory file PR #1214's evshim writes to. So evshim's `pwrite(rumble_fd, vals, 4, 32)` half is dead code on this base; the only half worth porting is the SDL `JoystickRumble` keepalive — but only if the SDL ~1 s auto-expiry actually manifests here. The full smali corpus has zero references to SDL/VirtualJoystick, suggesting the imagefs's guest-side IPC client is custom and may not introduce the auto-expiry at all.
+**Status:** Diagnostic kept in place after the libevshim.so feature shipped — it now serves as a verification hook (the `[SDL_AUTO_EXPIRY?]` tags should disappear when the shim is working). Original notes follow.
+#### Why (original)
+Investigating whether GameNative PR #1214's `evshim`-based SDL keepalive applies to BannerHub. Architectural review of `libwinemu.so` (Tencent's `winemu::GamepadServer`) found GameHub's gamepad bridge is an AF_UNIX IPC socket named `winemu` carrying `MessageHeader`-framed messages — *not* the `gamepad.mem` shared-memory file PR #1214's evshim writes to. So evshim's `pwrite(rumble_fd, vals, 4, 32)` half is dead code on this base; the only half worth porting is the SDL `JoystickRumble` keepalive — but only if the SDL ~1 s auto-expiry actually manifests here. The full smali corpus has zero references to SDL/VirtualJoystick, suggesting the imagefs's guest-side IPC client is custom and may not introduce the auto-expiry at all. **Update from later reverse engineering: the SDL bridge does exist — in libvfs.so on the imagefs side, not in any host-side smali. See [feat] entry above.**
 #### What changed
 - `BhVibrationController.handleRumble`: log every guest-side state transition with a per-slot gap-from-last-frame in milliseconds. Tags `non-zero -> (0,0)` arrivals where gap is 900-1200 ms with `[SDL_AUTO_EXPIRY?]` so the bug is grep-able in logcat.
 - Diagnostic uses its own `diagPrev{Low,High,When}` arrays so MODE_OFF (which skips the dispatch-state update) doesn't corrupt the trace.
