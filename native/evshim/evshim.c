@@ -209,11 +209,46 @@ void SDL_JoystickClose(SDL_Joystick *js)
     }
 }
 
+/* Force libSDL2-2.0.so into the global linker namespace before libvfs.so
+ * gets a chance to dlopen it RTLD_LOCAL. Without this, libvfs.so's later
+ * dlopen with default flags creates a private namespace; winebus.so's
+ * NEEDED libSDL2 dependency then reuses that private instance and winebus's
+ * SDL_JoystickRumble lookups never reach our LD_PRELOAD'd shim.
+ *
+ * We try the unqualified name first (relying on the linker's search path)
+ * then fall back to an absolute path derived from WINEMU_ROOT_FS env var. */
+static void preload_sdl_global(void)
+{
+    void *h = dlopen("libSDL2-2.0.so", RTLD_NOW | RTLD_GLOBAL);
+    if (h) {
+        LOG("preload: dlopen libSDL2-2.0.so RTLD_GLOBAL ok h=%p\n", h);
+        return;
+    }
+    const char *err1 = dlerror();
+    const char *root = getenv("WINEMU_ROOT_FS");
+    if (root && *root) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/files/usr/lib/libSDL2-2.0.so", root);
+        h = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+        if (h) {
+            LOG("preload: dlopen %s RTLD_GLOBAL ok h=%p\n", path, h);
+            return;
+        }
+        LOG("preload: both dlopens failed (1) %s (2) %s\n", err1 ? err1 : "?", dlerror());
+    } else {
+        LOG("preload: dlopen libSDL2-2.0.so failed (%s) and WINEMU_ROOT_FS not set\n",
+            err1 ? err1 : "?");
+    }
+}
+
 __attribute__((constructor))
 static void evshim_ctor(void)
 {
     LOG("loaded (MAX_SLOTS=%d, interval=%dms, duration=%dms)\n",
         MAX_SLOTS, KEEPALIVE_INTERVAL_US / 1000, KEEPALIVE_DURATION_MS);
+    /* Promote libSDL2 to global scope BEFORE resolve_real so dlsym(RTLD_NEXT)
+     * has something to find. */
+    preload_sdl_global();
     resolve_real();
     LOG("ctor resolved real_SDL_JoystickRumble=%p real_SDL_JoystickClose=%p\n",
         (void *)real_SDL_JoystickRumble, (void *)real_SDL_JoystickClose);
