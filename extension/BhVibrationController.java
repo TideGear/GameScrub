@@ -68,6 +68,14 @@ public final class BhVibrationController {
     private static final long DEVICE_RUMBLE_REFRESH_MS = 140L; // < DEVICE_RUMBLE_MS
     private static final long RUMBLE_KEEPALIVE_MS = 1500L;     // refresh controller before 2s expiry
 
+    // SDL auto-expiry suppression window. Wine-SDL fires OnRumble(0,0) exactly
+    // 1000 ms after a non-zero rumble starts even when the game wants sustained
+    // vibration; diagnostic traces showed cutoffs always at 1000-1001 ms while
+    // real game-driven stops were 77-279 ms, so a ±50 ms window cleanly splits
+    // the two.
+    private static final long SDL_AUTO_EXPIRY_MIN_MS = 950L;
+    private static final long SDL_AUTO_EXPIRY_MAX_MS = 1050L;
+
     private static volatile BhVibrationController INSTANCE;
 
     public static BhVibrationController getInstance() {
@@ -285,18 +293,41 @@ public final class BhVibrationController {
         ensureContext();
         maybeResolveContainerFromActivityStack();
 
+        int newLow = low & 0xFFFF;
+        int newHigh = high & 0xFFFF;
+
         // Diagnostic: log every state change from the guest with a timestamp delta.
-        // Flags non-zero -> (0,0) arrivals around 1 s as suspected SDL auto-expiry,
-        // which is the bug GameNative PR #1214's evshim keepalive fixes. Read prev
-        // state BEFORE the OFF early-return so the trace stays accurate across modes.
-        logGuestTransition(slot, low & 0xFFFF, high & 0xFFFF);
+        // Flags non-zero -> (0,0) arrivals around 1 s as SDL auto-expiry (the bug
+        // GameNative PR #1214's evshim keepalive fixes guest-side). Read prev state
+        // BEFORE the OFF early-return so the trace stays accurate across modes.
+        logGuestTransition(slot, newLow, newHigh);
 
         int mode = cachedMode;
         if (mode == MODE_OFF) return true; // swallow everything
 
+        // SDL auto-expiry suppression: when (0,0) arrives within the ~1 s window
+        // after the last non-zero on this slot, treat it as Wine-SDL's internal
+        // timer firing and swallow it. Returning true short-circuits the stock
+        // GameHub controller dispatch, so the active VibrationEffect keeps
+        // running and the host-side keepalive runnable refreshes it before the
+        // 2 s expiry. Real game-driven stops have gaps well outside this window.
+        if (newLow == 0 && newHigh == 0) {
+            int prevLow = slotLow[slot];
+            int prevHigh = slotHigh[slot];
+            long prevStamp = slotStamp[slot];
+            if ((prevLow | prevHigh) != 0 && prevStamp > 0) {
+                long gap = SystemClock.uptimeMillis() - prevStamp;
+                if (gap >= SDL_AUTO_EXPIRY_MIN_MS && gap <= SDL_AUTO_EXPIRY_MAX_MS) {
+                    Log.i(TAG, "suppress SDL auto-expiry slot=" + slot
+                            + " gap=" + gap + "ms (keep " + prevLow + "," + prevHigh + " alive)");
+                    return true;
+                }
+            }
+        }
+
         // Store per-slot raw values for device aggregation.
-        slotLow[slot] = low & 0xFFFF;
-        slotHigh[slot] = high & 0xFFFF;
+        slotLow[slot] = newLow;
+        slotHigh[slot] = newHigh;
         slotStamp[slot] = SystemClock.uptimeMillis();
 
         if (mode == MODE_DEVICE || mode == MODE_BOTH) {

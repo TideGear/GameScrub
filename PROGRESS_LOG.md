@@ -4,6 +4,33 @@ Tracks every commit, patch, and change applied to the GameHub 5.3.5 ReVanced APK
 
 ---
 
+### [fix] — Suppress SDL auto-expiry in BhVibrationController.handleRumble (2026-05-04)
+**Commit:** pending
+**Bug:** Wine-SDL fires `OnRumble(0, 0)` exactly 1000 ms after a non-zero rumble starts, even when the game wants sustained vibration. Host treats it as "rumble stopped" and cancels the controller motors. Result: every sustained rumble cuts off at 1 s, then re-starts on the game's next frame — feels stuck/pulsing.
+**Diagnosis (from diagnostic trace below):** Six tagged `[SDL_AUTO_EXPIRY?]` arrivals all at gap=1000-1001 ms exactly. Real game-driven stops in the same trace cluster at 77-279 ms — clean separation.
+#### What changed
+- New constants `SDL_AUTO_EXPIRY_MIN_MS = 950` / `SDL_AUTO_EXPIRY_MAX_MS = 1050` define the suppression window.
+- `BhVibrationController.handleRumble`: when `(0, 0)` arrives within `[950, 1050]` ms of the last non-zero on the same slot, swallow it (return `true` to short-circuit the stock dispatch cascade). Logs `suppress SDL auto-expiry slot=N gap=Xms (keep L,H alive)` for grep-able auditing.
+- Existing host-side keepalive runnable (refresh every 1.5 s, `CONTROLLER_RUMBLE_MS = 2000`) handles the actual motor refresh — it just needed to stop being silenced by the spurious zero.
+#### Why this works without native code
+Returning `true` from `handleRumble` makes the `GamepadServerManager.onRumble` smali patch `return-void` early, so `GamepadDevice$Physical.h(II)V` is never called for the spurious zero. `controllerKeepalive` map keeps the last non-zero values; the keepalive runnable refreshes the `VibrationEffect.createOneShot(2000ms)` every 1500 ms; controller motors stay smooth. Real game-driven `(0, 0)` (gap < 950 ms or > 1050 ms) falls through the suppression and stops the rumble normally.
+#### Files touched
+- `extension/BhVibrationController.java` — 2 new constants, 14-line suppression block at the head of `handleRumble` after the MODE_OFF check
+#### Known limits
+- If a future game intentionally sends a 1000-ms rumble pulse followed by a hard stop, the stop would be delayed by up to 500 ms (until the next keepalive tick fails to find non-zero). XInput "set and forget" semantics make this rare.
+- Device-side aggregation (`MODE_DEVICE` / `MODE_BOTH`) also benefits: the `slotLow/slotHigh` arrays don't get zeroed during the suppression, so phone-side rumble stays smooth too.
+
+---
+
+### [ci] — Add BhVibration smali patches step to build-quick.yml (2026-05-04)
+**Commit:** pending
+**Bug:** `build-quick.yml` (used for every `main` branch push) was missing the `Apply BhVibration smali patches` step that exists in `build.yml` (used for tagged releases). `BhVibrationController.java` shipped in `classes18.dex` but the smali hooks into `GamepadServerManager.onRumble` and `GamepadDevice$Physical.h(II)V` were never patched, so rumble bypassed the dispatcher entirely. Latent since the original "Game Controller Improvement" commit.
+**Symptom:** No `BhVibration` logcat lines despite `BhVibrationController` being present in dexes; both motors fire together (stock GameHub blends low+high through `GamepadDevice$Physical.p(Vibrator, F)`); per-container settings dialog inaccessible (Patch 3 missing).
+**Fix:** Copied the entire `Apply BhVibration smali patches` step verbatim from `build.yml` to `build-quick.yml`, translating paths from `apktool_out_base/` to `apktool_out/` (the path scheme quick builds use).
+**Files touched:** `.github/workflows/build-quick.yml`
+
+---
+
 ### [diag] — SDL auto-expiry trace in BhVibrationController (2026-05-04)
 **Commit:** pending
 #### Why
