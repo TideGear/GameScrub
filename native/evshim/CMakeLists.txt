@@ -13,7 +13,9 @@ target_compile_options(evshim PRIVATE -O2 -Wall -Wextra -fPIC)
 
 # pthread is part of bionic libc on Android — no separate libpthread to link.
 # dl is a real lib we need for dlsym/RTLD_NEXT.
-target_link_libraries(evshim PRIVATE dl)
+# log is needed for __android_log_print (we log to logcat directly because
+# Wine subprocess stderr is not always piped through ProcessHelper).
+target_link_libraries(evshim PRIVATE dl log)
 
 set_target_properties(evshim PROPERTIES
     LINK_FLAGS "-Wl,--as-needed"
