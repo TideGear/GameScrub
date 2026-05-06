@@ -127,10 +127,16 @@ public final class BhVibrationController {
 
     // Hard cap on suppression. After this, force-stop the motor regardless —
     // bounds worst-case "false rumble after release" because Wine doesn't
-    // re-issue a (0,0) once SDL is in its stopped state. 5 s feels generous
-    // for sustained rumble (engine, environmental) without lingering too long
-    // after a real release.
-    private static final long MAX_SUSTAINED_RUMBLE_MS = 5000L;
+    // re-issue a (0,0) once SDL is in its stopped state. The user releases
+    // their input but the host can't see it (no event from Wine), so this
+    // cap is effectively the worst-case lag between a real release and
+    // motor stop. Tuning trade-off:
+    //   higher → sustained rumble lasts longer, but lingers longer after release
+    //   lower  → instant release, but sustained cuts shorter
+    // 1 s gives ~2 s sustained (1 s real + 1 s extension via the existing
+    // 2 s VibrationEffect that's still running) with at most ~1 s false
+    // rumble after release.
+    private static final long MAX_SUSTAINED_RUMBLE_MS = 1000L;
 
     // Last device-effect time so we don't overwhelm phone vibrator.
     private volatile long lastDeviceDispatch = 0L;
