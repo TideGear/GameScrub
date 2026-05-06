@@ -113,10 +113,13 @@ static void free_slot_for(SDL_Joystick *js)
 static void *keepalive_thread(void *arg)
 {
     (void)arg;
-    LOG("keepalive thread running\n");
+    LOG("keepalive thread running (interval=%dms duration=%dms)\n",
+        KEEPALIVE_INTERVAL_US / 1000, KEEPALIVE_DURATION_MS);
 
+    long tick = 0;
     for (;;) {
         usleep(KEEPALIVE_INTERVAL_US);
+        tick++;
 
         /* Snapshot under the lock to keep the real SDL call outside the
          * critical section. Race window with a stop arriving mid-snapshot
@@ -135,6 +138,8 @@ static void *keepalive_thread(void *arg)
         if (!real_SDL_JoystickRumble) continue;
 
         for (int i = 0; i < snap_n; i++) {
+            LOG("keepalive tick=%ld js=%p low=%u high=%u\n",
+                tick, (void *)snap[i].js, snap[i].low, snap[i].high);
             (void)real_SDL_JoystickRumble(snap[i].js, snap[i].low, snap[i].high,
                                           KEEPALIVE_DURATION_MS);
         }
@@ -158,14 +163,10 @@ static void start_keepalive(void)
 int SDL_JoystickRumble(SDL_Joystick *js, uint16_t low_freq, uint16_t high_freq,
                        uint32_t duration_ms)
 {
-    /* Trace the first few calls so we can prove interposition is happening
-     * (and via which thread). */
-    static int s_diag_count = 0;
-    if (s_diag_count < 6) {
-        LOG("SDL_JoystickRumble call#%d: js=%p low=%u high=%u dur=%ums\n",
-            s_diag_count, (void *)js, low_freq, high_freq, duration_ms);
-        s_diag_count++;
-    }
+    /* Verbose: log every call so we can see exactly what winebus.so is
+     * sending and when. If you find this too chatty, change LOG to LOGD. */
+    LOG("SDL_JoystickRumble: js=%p low=%u high=%u dur=%ums tid=%d\n",
+        (void *)js, low_freq, high_freq, duration_ms, (int)gettid());
 
     resolve_real();
     if (!real_SDL_JoystickRumble) {
@@ -201,6 +202,7 @@ int SDL_JoystickRumble(SDL_Joystick *js, uint16_t low_freq, uint16_t high_freq,
 
 void SDL_JoystickClose(SDL_Joystick *js)
 {
+    LOG("SDL_JoystickClose: js=%p tid=%d\n", (void *)js, (int)gettid());
     resolve_real();
 
     pthread_mutex_lock(&g_lock);
@@ -234,6 +236,8 @@ typedef struct {
     const char *target_sym;   /* exact symbol name */
     void       *new_func;     /* address of our wrapper */
     int         patched;      /* output: 1 on success */
+    int         enumerate;    /* if 1, log every name encountered */
+    int         enum_count;   /* libraries seen during this iteration */
 } got_patch_ctx_t;
 
 static int got_patch_iter(struct dl_phdr_info *info, size_t size, void *data)
@@ -243,8 +247,13 @@ static int got_patch_iter(struct dl_phdr_info *info, size_t size, void *data)
     if (ctx->patched) return 1;
 
     const char *name = info->dlpi_name;
+    if (ctx->enumerate) {
+        LOG("dl_iter[%d]: name=%s base=%p\n",
+            ctx->enum_count++, name ? name : "(null)", (void *)info->dlpi_addr);
+    }
     if (!name || !*name) return 0;
     if (!strstr(name, ctx->target_lib)) return 0;
+    LOG("dl_iter MATCH: %s base=%p\n", name, (void *)info->dlpi_addr);
 
     /* Find PT_DYNAMIC */
     const ElfW(Phdr) *dynp = NULL;
@@ -323,7 +332,7 @@ static int got_patch_iter(struct dl_phdr_info *info, size_t size, void *data)
 
 static int s_winebus_patched = 0;
 
-static int try_patch_winebus(void)
+static int try_patch_winebus(int enumerate)
 {
     if (s_winebus_patched) return 1;
     got_patch_ctx_t ctx = {
@@ -331,8 +340,14 @@ static int try_patch_winebus(void)
         .target_sym = "SDL_JoystickRumble",
         .new_func   = (void *)&SDL_JoystickRumble,
         .patched    = 0,
+        .enumerate  = enumerate,
+        .enum_count = 0,
     };
     dl_iterate_phdr(got_patch_iter, &ctx);
+    if (ctx.enumerate) {
+        LOG("dl_iter: enumerated %d libraries (winebus.so %s)\n",
+            ctx.enum_count, ctx.patched ? "PATCHED" : "not found");
+    }
     if (ctx.patched) {
         s_winebus_patched = 1;
         return 1;
@@ -340,21 +355,30 @@ static int try_patch_winebus(void)
     return 0;
 }
 
+/* Poll for winebus.so. Significantly less aggressive than the original:
+ * 6 attempts spread over 30 seconds (every 5 s) instead of 1200 attempts
+ * at 50 ms. The first attempt enumerates ALL loaded libraries so we can
+ * see exactly what dl_iterate_phdr returns and find winebus.so by its
+ * actual reported name (which may differ from the literal "winebus.so").
+ *
+ * If polling caused the gamepad-detection regression by holding linker
+ * locks, this 100x cadence reduction should restore it. If detection
+ * still doesn't work, polling wasn't the cause and the enumeration log
+ * tells us what to do next.
+ */
 static void *got_patcher_thread(void *arg)
 {
     (void)arg;
-    LOG("got_patcher: thread running, polling for winebus.so\n");
-    /* Poll for up to 60 seconds at 50 ms cadence. winebus.so loads when
-     * Wine's HID stack initializes, typically within a few seconds of
-     * Wine startup. */
-    for (int i = 0; i < 1200; i++) {
-        if (try_patch_winebus()) {
-            LOG("got_patcher: winebus.so patched (after %d ticks)\n", i);
+    LOG("got_patcher: thread starting (6 attempts, 5s apart, 30s total)\n");
+    for (int attempt = 0; attempt < 6; attempt++) {
+        int enumerate = (attempt == 0);  /* full library list on first try only */
+        if (try_patch_winebus(enumerate)) {
+            LOG("got_patcher: winebus.so patched (attempt #%d)\n", attempt);
             return NULL;
         }
-        usleep(50 * 1000);
+        sleep(5);
     }
-    LOG("got_patcher: gave up after 60 s\n");
+    LOG("got_patcher: gave up after 30 s\n");
     return NULL;
 }
 
@@ -406,7 +430,7 @@ static void evshim_ctor(void)
      * loaded before libevshim — unlikely but harmless). Then spawn a
      * polling thread to handle the common case where winebus.so loads
      * later when Wine's HID stack initializes. */
-    if (!try_patch_winebus()) {
+    if (!try_patch_winebus(/*enumerate=*/0)) {
         pthread_t tid;
         if (pthread_create(&tid, NULL, got_patcher_thread, NULL) == 0) {
             pthread_detach(tid);
