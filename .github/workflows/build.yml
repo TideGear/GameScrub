@@ -542,12 +542,11 @@ jobs:
 
           # Patch 7: GamepadDevice$Physical.g()V — stop hook.
           # Stock GamepadDevice.f(II)V routes (0,0) -> g() and non-zero -> h(II)V.
-          # Our Patch 2 only hooks h(II)V, so (0,0) bypasses our handler and the
-          # controllerKeepalive map never gets cleared — keepalive runnable
-          # re-fires cached non-zero values every 1500 ms forever (indefinite
-          # rumble). Inject a notification at the head of g() so we can clear
-          # the keepalive entry; stock g() continues right after with its
-          # per-vibrator cancel.
+          # Our Patch 2 only hooks h(II)V, so (0,0) bypasses our handler.
+          # onStop returns boolean: true = suppress (SDL auto-expiry phantom,
+          # skip stock g() so motor effect keeps running and the keepalive
+          # runnable refreshes it up to MAX_SUSTAINED_RUMBLE_MS), false = real
+          # game stop (let stock g() iterate vibrators and cancel each).
           patch(
               'apktool_out_base/smali_classes5/com/winemu/core/gamepad/GamepadDevice$Physical.smali',
               '.method public g()V\n'
@@ -558,13 +557,17 @@ jobs:
               '.method public g()V\n'
               '    .locals 1\n'
               '\n'
-              '    # BH: notify our handler to clear keepalive map; stock g() iterates after.\n'
+              '    # BH: dispatch to our handler. true = suppress SDL phantom (skip stock g()).\n'
               '    iget v0, p0, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->d:I\n'
-              '    invoke-static {v0}, Lcom/xj/winemu/vibration/BhVibrationController;->onStop(I)V\n'
+              '    invoke-static {v0}, Lcom/xj/winemu/vibration/BhVibrationController;->onStop(I)Z\n'
+              '    move-result v0\n'
+              '    if-eqz v0, :bh_g_fallthrough\n'
+              '    return-void\n'
+              '    :bh_g_fallthrough\n'
               '\n'
               '    .line 1\n'
               '    invoke-virtual {p0}, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->o()Ljava/util/List;\n',
-              'GamepadDevice$Physical.g(): inject BhVibrationController.onStop notify hook'
+              'GamepadDevice$Physical.g(): inject BhVibrationController.onStop with suppress-on-true'
           )
 
           print("\nBhVibration smali patches applied successfully.")
