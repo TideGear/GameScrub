@@ -474,6 +474,70 @@ static int patch_winebus_at_base(uintptr_t base)
     return patched > 0;
 }
 
+/* SDL2 event type constants we emit. Hard-coded so we don't need
+ * <SDL.h>; values are stable across SDL2.x. */
+#define SDL_JOYDEVICEADDED 0x605
+
+/* Push synthetic SDL_JOYDEVICEADDED events for every joystick currently
+ * registered with SDL, so winebus.so's sdl_bus_wait re-processes them
+ * and opens any it missed during its startup race against libvfs.
+ *
+ * Why: libvfs creates virtual joysticks at slot-count change time,
+ * emitting one SDL_JOYDEVICEADDED per slot. winebus.so's sdl_bus_init
+ * runs only once winebus is loaded into winedevice — typically AFTER
+ * libvfs is up. With one controller (count 0→1) the event arrives in
+ * winebus's event loop and the joystick opens. With two controllers
+ * connected at launch (count 0→2) both events are emitted before
+ * winebus is fully ready, and winebus's later poll-loop misses one or
+ * both. The slot stays "created in libvfs but never opened in winebus"
+ * — XInputGetState reports DEVICE_NOT_CONNECTED, rumble dispatch
+ * silently no-ops.
+ *
+ * winebus's sdl_add_device dedupes by SDL_JoystickGetDeviceInstanceID,
+ * so re-emitting JOYDEVICEADDED for joysticks it already opened is a
+ * harmless no-op. Joysticks it missed get opened.
+ *
+ * Done from inside winedevice (evshim's patcher thread) where libSDL2
+ * is loaded, after winebus.so has been patched (which by construction
+ * is after winebus.so's sdl_bus_init has run, so SDL events will
+ * actually be processed by winebus's loop). */
+static void wake_winebus_joysticks(void)
+{
+    /* libSDL2 is already in this process's namespace (we LD_PRELOAD'd
+     * it for the rumble keepalive). Use RTLD_DEFAULT so dlsym finds
+     * libvfs's loaded copy / the global one — same instance winebus
+     * is using. */
+    int (*p_NumJoysticks)(void) =
+        (int (*)(void))dlsym(RTLD_DEFAULT, "SDL_NumJoysticks");
+    int (*p_PushEvent)(void *) =
+        (int (*)(void *))dlsym(RTLD_DEFAULT, "SDL_PushEvent");
+    uint32_t (*p_GetTicks)(void) =
+        (uint32_t (*)(void))dlsym(RTLD_DEFAULT, "SDL_GetTicks");
+
+    if (!p_NumJoysticks || !p_PushEvent) {
+        LOG("wake_winebus: missing SDL symbols (NumJoysticks=%p PushEvent=%p)",
+            (void *)p_NumJoysticks, (void *)p_PushEvent);
+        return;
+    }
+
+    int n = p_NumJoysticks();
+    LOG("wake_winebus: SDL_NumJoysticks=%d", n);
+    if (n <= 0) return;
+
+    /* SDL_Event is a union; SDL_JoyDeviceEvent is the variant we want.
+     * Layout: type(u32, +0), timestamp(u32, +4), which(s32, +8). The
+     * union's full size is 56 bytes in SDL2.x; allocate 64 to be safe. */
+    char evt[64];
+    for (int i = 0; i < n; i++) {
+        memset(evt, 0, sizeof(evt));
+        *(uint32_t *)(evt + 0) = SDL_JOYDEVICEADDED;
+        *(uint32_t *)(evt + 4) = p_GetTicks ? p_GetTicks() : 0;
+        *(int32_t  *)(evt + 8) = i;
+        int rc = p_PushEvent(evt);
+        LOG("wake_winebus: pushed JOYDEVICEADDED which=%d rc=%d", i, rc);
+    }
+}
+
 /* Write a "winedevice ready" marker file so BannerHub Java side knows
  * libvfs-client has finished initializing in this winedevice process and
  * is ready to receive GamepadState writes. BhVibrationController watches
@@ -537,6 +601,12 @@ static void *one_shot_patcher_thread(void *arg)
          * Tell Java side the shared GamepadState buffer is now safe to
          * write to. */
         write_ready_marker();
+        /* Force winebus to (re-)open every joystick libvfs has registered.
+         * Catches the race where libvfs's initial SDL_JOYDEVICEADDED events
+         * fired before winebus's sdl_bus_wait was running — multi-controller
+         * scenario at app launch. Dedup is handled by winebus internally
+         * (instance-id keyed) so this is a no-op for already-opened slots. */
+        wake_winebus_joysticks();
     }
     return NULL;
 }
