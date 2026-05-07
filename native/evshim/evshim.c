@@ -401,14 +401,19 @@ static void evshim_ctor(void)
     resolve_real();
     LOG("ctor resolved real_SDL_JoystickRumble=%p", (void *)real_SDL_JoystickRumble);
 
-    /* Try GOT patch immediately (handles the unlikely case winebus.so
-     * already loaded). Then start the slow polling fallback — primary
-     * trigger is the dlopen interpose above, which catches the load the
-     * moment it happens. */
-    if (!try_patch_winebus()) {
-        pthread_t tid;
-        if (pthread_create(&tid, NULL, got_patcher_thread, NULL) == 0) {
-            pthread_detach(tid);
-        }
-    }
+    /* GOT-patcher disabled. Multiple iterations (try 4 inline, try 4b
+     * deferred-thread, try 4c polling-only) all introduced regressions
+     * where Wine's input/rumble pipeline broke after a couple of rumble
+     * events — even when the patcher itself never fired. Likely cause:
+     * any periodic dl_iterate_phdr from a background thread interferes
+     * with Wine's HID stack subtly enough to be hard to pin down.
+     *
+     * Falling back to pure host-side SDL phantom suppression with a
+     * bounded timeout (BhVibrationController). That gave the user
+     * "Good!" feedback last time, just with ~1 s lag after release.
+     * Worth shipping vs continuing to chase the GOT path that keeps
+     * breaking things.
+     */
+    (void)try_patch_winebus;       /* silence unused-function warning */
+    (void)got_patcher_thread;
 }
