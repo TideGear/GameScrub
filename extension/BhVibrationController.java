@@ -509,6 +509,13 @@ public final class BhVibrationController {
         if (serverManager == null || slot < 0 || slot >= MAX_SLOTS) {
             return;
         }
+        // Resolve the application Context first — without it we can't find
+        // getFilesDir() to register the FileObserver. handleScheduleWakeup
+        // is sometimes the FIRST entry point hit on cold start (before any
+        // rumble dispatch has called ensureContext for us).
+        ensureContext();
+        maybeResolveContainerFromActivityStack();
+
         ensureReadinessWatcher();
         pendingWakeups.put(slot, serverManager);
         Log.i(TAG, "wake-up queued slot=" + slot + " (awaiting winedevice ready marker)");
