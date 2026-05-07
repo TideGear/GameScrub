@@ -18,6 +18,8 @@ import android.view.InputDevice;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.atomic.AtomicLongArray;
 
 /**
  * BhVibrationController — PC-accurate XInput rumble dispatcher.
@@ -56,6 +58,12 @@ public final class BhVibrationController {
     // Stock behaviour: controller-on, full intensity. User can disable per container.
     private static final int DEFAULT_MODE = MODE_CONTROLLER;
     private static final int DEFAULT_INTENSITY = 100;
+
+    // Compile-time flag: when false, R8 strips logGuestTransition's body
+    // and the diagPrev* arrays drop to dead state. Keep true while the
+    // GOT-patcher / SDL keepalive interaction is still being validated;
+    // flip to false for stable release builds. See logGuestTransition.
+    private static final boolean DIAG = true;
 
     // XInput slots count (matches GamepadServerManager's slot range 0..3)
     private static final int MAX_SLOTS = 4;
@@ -97,13 +105,21 @@ public final class BhVibrationController {
     private final Handler worker;
 
     // Device-side (phone) aggregation: per-slot last rumble amplitudes.
-    private final int[] slotLow = new int[MAX_SLOTS];
-    private final int[] slotHigh = new int[MAX_SLOTS];
-    private final long[] slotStamp = new long[MAX_SLOTS];
+    //
+    // These are written on the gameplay/dispatch thread (handleRumble) and
+    // read on the worker thread (dispatchDevice, refreshDeviceRumble,
+    // keepaliveRunnable). Plain int[]/long[] don't guarantee visibility
+    // across threads on the JVM, and long[] reads/writes can tear on 32-bit
+    // ARM. Atomic{Integer,Long}Array gives us per-slot volatile semantics
+    // without coarse-grained locking.
+    private final AtomicIntegerArray slotLow = new AtomicIntegerArray(MAX_SLOTS);
+    private final AtomicIntegerArray slotHigh = new AtomicIntegerArray(MAX_SLOTS);
+    private final AtomicLongArray slotStamp = new AtomicLongArray(MAX_SLOTS);
 
     // Diagnostic-only state: tracks the LAST guest frame regardless of mode so
     // the auto-expiry trace works in any mode and isn't perturbed by MODE_OFF
-    // skipping the dispatch-state update. See logGuestTransition.
+    // skipping the dispatch-state update. See logGuestTransition. Single-thread
+    // (dispatch thread only) so plain arrays are fine here.
     private final int[] diagPrevLow = new int[MAX_SLOTS];
     private final int[] diagPrevHigh = new int[MAX_SLOTS];
     private final long[] diagPrevWhen = new long[MAX_SLOTS];
@@ -142,6 +158,13 @@ public final class BhVibrationController {
 
                 // Controller side: refresh any active controller whose last dispatch
                 // is older than KEEPALIVE threshold and whose amplitude is non-zero.
+                //
+                // Snapshot the entries that need refreshing under the lock, then
+                // release the lock before issuing dispatchControllerInternal — the
+                // underlying VibratorManager.vibrate() is a binder call (~ms IPC
+                // latency) and holding the keepalive lock across it would block
+                // the gameplay-thread recordKeepalive() calls.
+                java.util.ArrayList<int[]> refresh = null;
                 synchronized (controllerKeepalive) {
                     for (Map.Entry<Integer, long[]> e : controllerKeepalive.entrySet()) {
                         long[] st = e.getValue();
@@ -149,11 +172,17 @@ public final class BhVibrationController {
                         int high = (int) st[1];
                         long when = st[2];
                         if ((low > 0 || high > 0) && (now - when) >= RUMBLE_KEEPALIVE_MS) {
-                            InputDevice dev = InputDevice.getDevice(e.getKey());
-                            if (dev != null) {
-                                dispatchControllerInternal(dev, low, high, /*log*/ false);
-                                st[2] = now;
-                            }
+                            if (refresh == null) refresh = new java.util.ArrayList<>(2);
+                            refresh.add(new int[] { e.getKey(), low, high });
+                            st[2] = now;
+                        }
+                    }
+                }
+                if (refresh != null) {
+                    for (int[] r : refresh) {
+                        InputDevice dev = InputDevice.getDevice(r[0]);
+                        if (dev != null) {
+                            dispatchControllerInternal(dev, r[1], r[2], /*log*/ false);
                         }
                     }
                 }
@@ -302,18 +331,18 @@ public final class BhVibrationController {
     // (dispatch). Our Patch 2 hooks h(II)V only, so without Patch 7 the (0,0)
     // would bypass our handler and our keepalive map would never clear.
     //
-    // Patch 7 hooks g()V to call onStop(deviceId). With libevshim's keepalive
-    // working, SDL2's 1 s auto-expiry can never fire, so onStop always takes
-    // the real-stop path and returns false to let stock g() iterate the
-    // vibrator list and cancel each (we've already issued our supersede
-    // pattern ahead of it).
+    // Patch 7 hooks g()V to call onStop(deviceId), which always issues our
+    // pre-cancel supersede pattern (Samsung-HAL workaround) and falls through
+    // to stock g() afterwards. Returns void — the previous boolean return
+    // (for SDL phantom suppression) became vestigial when libevshim's
+    // keepalive made phantom suppression unnecessary; the smali patch no
+    // longer branches on the result.
     // ─────────────────────────────────────────────────────────────────────────
-    public static boolean onStop(int deviceId) {
+    public static void onStop(int deviceId) {
         try {
-            return getInstance().handleStop(deviceId);
+            getInstance().handleStop(deviceId);
         } catch (Throwable t) {
             Log.w(TAG, "onStop failed", t);
-            return false;
         }
     }
 
@@ -336,9 +365,9 @@ public final class BhVibrationController {
         if (mode == MODE_OFF) return true; // swallow everything
 
         // Store per-slot raw values for device aggregation.
-        slotLow[slot] = low & 0xFFFF;
-        slotHigh[slot] = high & 0xFFFF;
-        slotStamp[slot] = SystemClock.uptimeMillis();
+        slotLow.set(slot, low & 0xFFFF);
+        slotHigh.set(slot, high & 0xFFFF);
+        slotStamp.set(slot, SystemClock.uptimeMillis());
 
         if (mode == MODE_DEVICE || mode == MODE_BOTH) {
             worker.post(new Runnable() {
@@ -383,29 +412,26 @@ public final class BhVibrationController {
     /**
      * Called from the smali patch on GamepadDevice$Physical.g()V — fires
      * whenever stock GameHub's GamepadDevice.f(II)V routes a (0, 0) rumble
-     * to the stop path.
-     *
-     * With libevshim's GOT patch on winebus.so + 500 ms keepalive, SDL2's
-     * 1 s rumble auto-expiry can no longer fire — every (0, 0) reaching us
-     * is a real game-driven release. We always take the real-stop path and
-     * return false so stock g() runs after us and iterates the vibrator
-     * list canceling each. We also issue our supersede pattern (1 ms
-     * minimum-amplitude vm.vibrate()) ahead of stock g() because on
-     * Samsung's Vibrator HAL for InputDevice vibrators, Vibrator.cancel()
-     * doesn't reliably halt BT-HID effects already uploaded to the
-     * controller.
+     * to the stop path. We issue our supersede pattern (1 ms minimum-
+     * amplitude vm.vibrate()) ahead of stock g() because on Samsung's
+     * Vibrator HAL for InputDevice vibrators, Vibrator.cancel() doesn't
+     * reliably halt BT-HID effects already uploaded to the controller.
+     * Stock g() runs after us and iterates the vibrator list canceling
+     * each.
      */
-    private boolean handleStop(int deviceId) {
+    private void handleStop(int deviceId) {
         Log.i(TAG, "STOP-G dev=" + deviceId);
         recordKeepalive(deviceId, 0, 0);
-        for (int i = 0; i < MAX_SLOTS; i++) {
-            slotLow[i] = 0;
-            slotHigh[i] = 0;
-        }
-        deviceActive = false;
+        // Don't touch slotLow[]/slotHigh[]/deviceActive here — those are
+        // indexed by *guest XInput slot*, not Android deviceId, so we have
+        // no way to know which slot belongs to the stopping controller.
+        // handleRumble already cleared this controller's slot when the (0,0)
+        // arrived (it precedes stock f()→g()→handleStop), and dispatchDevice
+        // recomputes deviceActive from the aggregate. Wiping all slots here
+        // would silence the phone vibrator and other controllers' rumble
+        // when ANY controller stops in a multi-controller session.
         // Supersede AHEAD of stock g()'s per-vibrator cancel.
         stopController(deviceId);
-        return false;
     }
 
     /**
@@ -420,6 +446,7 @@ public final class BhVibrationController {
      * frame. Filter logcat with `BhVibration` and grep "DIAG ".
      */
     private void logGuestTransition(int slot, int newLow, int newHigh) {
+        if (!DIAG) return;
         int prevLow = diagPrevLow[slot];
         int prevHigh = diagPrevHigh[slot];
         long prevWhen = diagPrevWhen[slot];
@@ -470,8 +497,7 @@ public final class BhVibrationController {
         // Fallback path: single-vibrator blend of low + high.
         Vibrator v = dev.getVibrator();
         if (v == null || !v.hasVibrator()) return;
-        int blended = (int) Math.min(255, Math.max(1, Math.round(lowAmp * 0.80 + highAmp * 0.33)));
-        vibrateSafe(v, blended, CONTROLLER_RUMBLE_MS, /*haptic*/ true);
+        vibrateSafe(v, blendLowHigh(lowAmp, highAmp), CONTROLLER_RUMBLE_MS, /*haptic*/ true);
     }
 
     private boolean tryCombinedDispatch(VibratorManager vm, int lowAmp, int highAmp, boolean logMotors) {
@@ -485,8 +511,7 @@ public final class BhVibrationController {
         if (sortedIds.length == 1) {
             Vibrator only = vm.getVibrator(sortedIds[0]);
             if (only == null) return false;
-            int blended = (int) Math.min(255, Math.max(1, Math.round(lowAmp * 0.80 + highAmp * 0.33)));
-            vibrateSafe(only, blended, CONTROLLER_RUMBLE_MS, /*haptic*/ true);
+            vibrateSafe(only, blendLowHigh(lowAmp, highAmp), CONTROLLER_RUMBLE_MS, /*haptic*/ true);
             return true;
         }
 
@@ -604,16 +629,22 @@ public final class BhVibrationController {
         int maxLow = 0, maxHigh = 0;
         long now = SystemClock.uptimeMillis();
         for (int i = 0; i < MAX_SLOTS; i++) {
-            if (now - slotStamp[i] > 1500L) { slotLow[i] = 0; slotHigh[i] = 0; continue; }
-            if (slotLow[i] > maxLow) maxLow = slotLow[i];
-            if (slotHigh[i] > maxHigh) maxHigh = slotHigh[i];
+            if (now - slotStamp.get(i) > 1500L) {
+                slotLow.set(i, 0);
+                slotHigh.set(i, 0);
+                continue;
+            }
+            int l = slotLow.get(i);
+            int h = slotHigh.get(i);
+            if (l > maxLow) maxLow = l;
+            if (h > maxHigh) maxHigh = h;
         }
         if (maxLow == 0 && maxHigh == 0) { deviceActive = false; return; }
 
         int intensity = cachedIntensity;
         int lowAmp = scaleAmplitude(maxLow, intensity);
         int highAmp = scaleAmplitude(maxHigh, intensity);
-        int blended = Math.min(255, Math.max(1, (int) Math.round(lowAmp * 0.80 + highAmp * 0.33)));
+        int blended = blendLowHigh(lowAmp, highAmp);
 
         // Haptic curve pow(x, 0.6) — makes small values more perceptible on the phone.
         double norm = blended / 255.0;
@@ -630,15 +661,37 @@ public final class BhVibrationController {
         // Recompute from last known slot values and re-dispatch if still active.
         int maxLow = 0, maxHigh = 0;
         for (int i = 0; i < MAX_SLOTS; i++) {
-            if (now - slotStamp[i] > 1500L) { slotLow[i] = 0; slotHigh[i] = 0; continue; }
-            if (slotLow[i] > maxLow) maxLow = slotLow[i];
-            if (slotHigh[i] > maxHigh) maxHigh = slotHigh[i];
+            if (now - slotStamp.get(i) > 1500L) {
+                slotLow.set(i, 0);
+                slotHigh.set(i, 0);
+                continue;
+            }
+            int l = slotLow.get(i);
+            int h = slotHigh.get(i);
+            if (l > maxLow) maxLow = l;
+            if (h > maxHigh) maxHigh = h;
         }
         if (maxLow == 0 && maxHigh == 0) {
             deviceActive = false;
             return;
         }
         dispatchDevice();
+    }
+
+    /**
+     * Single-vibrator blend of XInput's two motor amplitudes onto one motor.
+     * Per GameNative PR #1214: low rumble (heavy) gets 0.80 weighting and
+     * high rumble (light) gets 0.33, clamped to [1, 255] so non-zero input
+     * never quantises away to silence on phones with weak vibrators. Used
+     * by both controller fallback dispatch (single-motor controllers) and
+     * device-mode dispatch (phone vibrator). Magic constants live in one
+     * place so they can be tuned consistently.
+     */
+    private static int blendLowHigh(int lowAmp, int highAmp) {
+        long blended = Math.round(lowAmp * 0.80 + highAmp * 0.33);
+        if (blended < 1) blended = 1;
+        if (blended > 255) blended = 255;
+        return (int) blended;
     }
 
     private Vibrator resolveDeviceVibrator(Context ctx) {

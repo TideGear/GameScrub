@@ -52,13 +52,20 @@ typedef struct SDL_Joystick SDL_Joystick;
 #define KEEPALIVE_INTERVAL_US  (500 * 1000)   /* 500 ms */
 #define KEEPALIVE_DURATION_MS  2000           /* must exceed SDL's ~1 s expiry */
 
-/* Log volume note: Try 3 (commit 7f406d6) caused BannerHub's startup
- * watchdog to fire because each Wine subprocess on first polling tick
- * dumped 30-70 dl_iter[N] log lines via __android_log_print. Across ~10
- * Wine subprocesses that's hundreds of lines hitting logd in a few
- * hundred ms — Java's processExited() pipe-drainer hung for 2+ seconds
- * and BannerHub SIGKILL'd the whole Wine tree. This try restricts log
- * output to ~3 lines per process at startup + only-on-event lines later. */
+/* EVSHIM_DIAG=1 enables on-event diagnostic logs (first-call trace, GOT
+ * patcher progress lines, winebus map dumps). EVSHIM_DIAG=0 strips them
+ * at compile time for release builds. Override via -DEVSHIM_DIAG=0 in
+ * CMake. Default 1 — these are cheap and have repeatedly proven useful
+ * when chasing patcher-vs-loader interactions. */
+#ifndef EVSHIM_DIAG
+#define EVSHIM_DIAG 1
+#endif
+
+/* Log volume guideline: keep startup output to ~3 lines per Wine
+ * subprocess + on-event lines only. High-frequency logging during init
+ * (e.g. per-tick polling output) has previously starved Java's
+ * processExited() pipe-drainer and tripped BannerHub's startup watchdog,
+ * resulting in SIGKILL of the whole Wine tree. */
 #define LOG(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "evshim", fmt, ##__VA_ARGS__)
 #define LOGE(fmt, ...) __android_log_print(ANDROID_LOG_ERROR, "evshim", fmt, ##__VA_ARGS__)
 
@@ -163,6 +170,7 @@ static void start_keepalive(void)
 int SDL_JoystickRumble(SDL_Joystick *js, uint16_t low_freq, uint16_t high_freq,
                        uint32_t duration_ms)
 {
+#if EVSHIM_DIAG
     /* Trace the first few calls so we can prove interposition is happening
      * (and via which thread). */
     static int s_diag_count = 0;
@@ -171,6 +179,7 @@ int SDL_JoystickRumble(SDL_Joystick *js, uint16_t low_freq, uint16_t high_freq,
             s_diag_count, (void *)js, low_freq, high_freq, duration_ms);
         s_diag_count++;
     }
+#endif
 
     resolve_real();
     if (!real_SDL_JoystickRumble) {
@@ -308,7 +317,8 @@ static void read_self_cmdline(char *out, size_t out_size)
     }
 }
 
-/* Patch winebus.so so its calls to SDL_JoystickRumble go through our wrapper.
+/* Patch winebus.so so its calls to SDL_JoystickRumble (and
+ * SDL_JoystickClose) go through our wrappers.
  *
  * winebus.so doesn't link against libSDL2-2.0.so directly (no NEEDED entry,
  * no relocation for SDL_JoystickRumble in either DT_JMPREL or DT_RELA — the
@@ -322,11 +332,15 @@ static void read_self_cmdline(char *out, size_t out_size)
  * Strategy:
  *   1. Walk PT_LOAD program headers in memory; find writable segments.
  *   2. Scan each writable segment 8-byte-aligned for any qword matching
- *      real_SDL_JoystickRumble (libSDL2's exported symbol address — what
- *      winebus's dlsym call returned for the same name).
- *   3. mprotect, overwrite each match with our wrapper, mprotect back.
+ *      one of our targets (libSDL2's exported symbol addresses — what
+ *      winebus's dlsym call returned for the same names).
+ *   3. mprotect, overwrite each match with our corresponding wrapper.
  *
- * Why scanning is safe: real_SDL_JoystickRumble is a 64-bit address. False
+ * Targets: SDL_JoystickRumble (always — primary purpose) and
+ * SDL_JoystickClose (so g_slots entries get evicted when winebus closes
+ * a joystick — without this our slot table can hold stale js pointers).
+ *
+ * Why scanning is safe: each target address is a 64-bit value. False
  * positives in random data are ~1/2^64 — effectively impossible. We also
  * confine the scan to winebus.so's own writable segments, so we never
  * touch other libraries' data. */
@@ -343,13 +357,50 @@ static int patch_winebus_at_base(uintptr_t base)
         return 0;
     }
 
+    /* Build target table: (target_addr, replacement_addr, name).
+     * SDL_JoystickClose is best-effort — if dlsym(RTLD_NEXT) didn't find
+     * it (e.g. older SDL2), skip that target rather than failing the
+     * whole patch. */
+    struct {
+        uintptr_t target;
+        uintptr_t replacement;
+        const char *name;
+    } targets[2];
+    int target_n = 0;
+    targets[target_n].target      = (uintptr_t)real_SDL_JoystickRumble;
+    targets[target_n].replacement = (uintptr_t)&SDL_JoystickRumble;
+    targets[target_n].name        = "pSDL_JoystickRumble";
+    target_n++;
+    if (real_SDL_JoystickClose) {
+        targets[target_n].target      = (uintptr_t)real_SDL_JoystickClose;
+        targets[target_n].replacement = (uintptr_t)&SDL_JoystickClose;
+        targets[target_n].name        = "pSDL_JoystickClose";
+        target_n++;
+    }
+
     const ElfW(Phdr) *ph = (const ElfW(Phdr) *)(base + eh->e_phoff);
     long page_size = sysconf(_SC_PAGESIZE);
-    uintptr_t target = (uintptr_t)real_SDL_JoystickRumble;
-    uintptr_t replacement = (uintptr_t)&SDL_JoystickRumble;
     int total_segments = 0;
     size_t total_bytes = 0;
     int patched = 0;
+
+    /* Locate PT_GNU_RELRO ranges first. A writable PT_LOAD covered (in whole
+     * or part) by PT_GNU_RELRO is downgraded to PROT_READ after relocation
+     * processing — that's where .data.rel.ro / .got / .got.plt live. We
+     * MUST NOT scan or modify those pages: they hold relocated immutable
+     * pointers, not dlsym'd ones, and degrading their RO permanently would
+     * weaken the binary's exploit mitigations for the lifetime of the
+     * process. pSDL_* lives in .bss which is in a separate non-RELRO
+     * writable PT_LOAD. */
+    uintptr_t relro_starts[4];
+    uintptr_t relro_ends[4];
+    int relro_n = 0;
+    for (int i = 0; i < eh->e_phnum && relro_n < 4; i++) {
+        if (ph[i].p_type != PT_GNU_RELRO) continue;
+        relro_starts[relro_n] = base + ph[i].p_vaddr;
+        relro_ends[relro_n]   = base + ph[i].p_vaddr + ph[i].p_memsz;
+        relro_n++;
+    }
 
     for (int i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type != PT_LOAD) continue;
@@ -368,24 +419,50 @@ static int patch_winebus_at_base(uintptr_t base)
 
         for (uintptr_t p = scan_start; p <= scan_end; p += sizeof(uintptr_t)) {
             uintptr_t *slot = (uintptr_t *)p;
-            if (*slot != target) continue;
+            uintptr_t value = *slot;
+
+            /* Match against any target. */
+            int t_idx = -1;
+            for (int t = 0; t < target_n; t++) {
+                if (value == targets[t].target) { t_idx = t; break; }
+            }
+            if (t_idx < 0) continue;
+
+            /* Skip if this slot falls inside a RELRO range. */
+            int in_relro = 0;
+            for (int r = 0; r < relro_n; r++) {
+                if (p >= relro_starts[r] && p < relro_ends[r]) {
+                    in_relro = 1;
+                    break;
+                }
+            }
+            if (in_relro) {
+                LOG("winebus scan: skipping match at %p — inside PT_GNU_RELRO",
+                    (void *)slot);
+                continue;
+            }
 
             uintptr_t page_addr = p & ~((uintptr_t)page_size - 1);
+            /* Page is in a non-RELRO writable PT_LOAD (.data or .bss),
+             * already PROT_READ|PROT_WRITE. mprotect-to-RW is a no-op for
+             * normal pages and acts as a belt-and-suspenders. */
             if (mprotect((void *)page_addr, (size_t)page_size,
                          PROT_READ | PROT_WRITE) != 0) {
                 LOGE("winebus scan: mprotect rw failed at %p: %s",
                      (void *)page_addr, strerror(errno));
                 continue;
             }
-            uintptr_t old = *slot;
-            *slot = replacement;
-            mprotect((void *)page_addr, (size_t)page_size, PROT_READ | PROT_WRITE);
-            /* Leave .data/.bss writable — winebus may legitimately rewrite
-             * its own pSDL table during shutdown. Reverting to PROT_READ
-             * would crash it. */
+            *slot = targets[t_idx].replacement;
+            /* No mprotect-back: the page's natural state is RW (it's .data
+             * or .bss, not RELRO'd). winebus may legitimately rewrite its
+             * own pSDL table during shutdown — re-applying PROT_READ would
+             * crash it. Pages we'd be tempted to restore-to-RO are skipped
+             * by the relro_starts[] check above. */
 
-            LOG("got_patch winebus.so: pSDL_JoystickRumble slot=%p old=0x%lx new=0x%lx",
-                (void *)slot, (unsigned long)old, (unsigned long)replacement);
+            LOG("got_patch winebus.so: %s slot=%p old=0x%lx new=0x%lx",
+                targets[t_idx].name, (void *)slot,
+                (unsigned long)targets[t_idx].target,
+                (unsigned long)targets[t_idx].replacement);
             patched++;
         }
     }
@@ -417,6 +494,43 @@ static void *one_shot_patcher_thread(void *arg)
         s_winebus_patched = 1;
     }
     return NULL;
+}
+
+/* Heuristic: does this Wine subprocess plausibly need SDL2 loaded into
+ * the global namespace? We use the /proc/self/cmdline contents to skip
+ * obvious system services (wineserver, services.exe, plugplay.exe,
+ * svchost.exe, explorer.exe, rpcss.exe, tabtip.exe, jwm) that never
+ * touch HID/gamepad input. winedevice.exe DOES need SDL2 (it loads
+ * winebus.so which dlopens SDL2), and so do the actual game .exe's,
+ * which we accept as the default-true case.
+ *
+ * Skipping the preload in ~7 of ~10 Wine subprocesses avoids loading
+ * libSDL2 + transitives (libpulse, libasound, libdbus, etc.) into
+ * processes that will never use them. */
+static int proc_needs_sdl(void)
+{
+    char cmd[256];
+    read_self_cmdline(cmd, sizeof(cmd));
+    /* Process-name suffixes we know don't use SDL — match case-insensitively
+     * since Windows-side paths can be either. */
+    static const char * const skip_markers[] = {
+        "wineserver",
+        "services.exe",
+        "plugplay.exe",
+        "svchost.exe",
+        "explorer.exe",
+        "rpcss.exe",
+        "tabtip.exe",
+        "/jwm ",
+        "/jwm",
+        NULL,
+    };
+    for (int i = 0; skip_markers[i]; i++) {
+        if (strstr(cmd, skip_markers[i])) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 /* Force libSDL2-2.0.so into the global linker namespace before libvfs.so
@@ -451,28 +565,74 @@ static void preload_sdl_global(void)
     }
 }
 
+/* Spawn the one-shot patcher thread. Pulled out of the ctor so the
+ * pthread_atfork child handler can re-arm it after a fork()-without-exec
+ * (POSIX kills all threads but the caller in the child, so the patch
+ * never runs in a forked Wine subprocess otherwise). */
+static void spawn_patcher_thread(void)
+{
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, one_shot_patcher_thread, NULL) == 0) {
+        pthread_detach(tid);
+    } else {
+        LOGE("spawn_patcher: pthread_create failed: %s", strerror(errno));
+    }
+}
+
+/* Called in the child after fork() returns. POSIX wipes all non-caller
+ * threads, so any keepalive thread already-started in the parent is gone
+ * — pthread_once still thinks start_keepalive ran though, so the keepalive
+ * is silently dead in the child. Reset the once-control AND re-spawn the
+ * patcher thread (the patch state is also gone in the child since memory
+ * was COW'd before fork — actually s_winebus_patched IS preserved across
+ * fork because it's set after the patch lands; if the parent already
+ * patched, the child inherits the patched memory, so we shouldn't re-patch.
+ * We DO need to re-arm the keepalive on first rumble though). */
+static void evshim_atfork_child(void)
+{
+    /* Reset keepalive once-control so the next SDL_JoystickRumble call
+     * re-spawns the keepalive thread in the child. */
+    pthread_once_t fresh = PTHREAD_ONCE_INIT;
+    g_keepalive_once = fresh;
+    /* If winebus wasn't patched in the parent at fork time, the parent's
+     * patcher thread is gone in the child — re-spawn so we still get a
+     * shot at patching post-fork. If the parent DID patch, the patched
+     * .bss memory is COW-inherited, so the child's calls already go
+     * through our wrapper; the re-spawned thread will scan, find the
+     * already-replaced pointer (== our wrapper, not the libSDL2 target),
+     * fail to match, and exit harmlessly. */
+    if (!s_winebus_patched) {
+        spawn_patcher_thread();
+    }
+}
+
 __attribute__((constructor))
 static void evshim_ctor(void)
 {
     LOG("loaded pid=%d", (int)getpid());
+    if (!proc_needs_sdl()) {
+        LOG("ctor: skipping SDL preload + patcher — process doesn't need it");
+        return;
+    }
     /* Promote libSDL2 to global scope BEFORE resolve_real so dlsym(RTLD_NEXT)
      * has something to find. */
     preload_sdl_global();
     resolve_real();
     LOG("ctor resolved real_SDL_JoystickRumble=%p", (void *)real_SDL_JoystickRumble);
 
+    /* Register child-side fork handler before spawning any threads so a
+     * fork-no-exec child can re-arm the keepalive. */
+    if (pthread_atfork(NULL, NULL, evshim_atfork_child) != 0) {
+        LOGE("ctor: pthread_atfork failed: %s", strerror(errno));
+    }
+
     /* Spawn the one-shot patcher thread. Sleeps 5 s, reads /proc/self/maps
-     * to find winebus.so, walks its in-memory ELF, patches the GOT slot.
-     * No linker calls. Single attempt. Thread exits after one try.
+     * to find winebus.so, walks its in-memory ELF, patches the .bss slot
+     * for pSDL_JoystickRumble. Single attempt. Thread exits after one try.
      *
      * In Wine subprocesses that don't load winebus.so (most of them),
      * find_winebus_base returns 0 and the thread quietly exits. Only
      * winedevice.exe will actually patch.
      */
-    pthread_t tid;
-    if (pthread_create(&tid, NULL, one_shot_patcher_thread, NULL) == 0) {
-        pthread_detach(tid);
-    } else {
-        LOGE("ctor: pthread_create for patcher failed: %s", strerror(errno));
-    }
+    spawn_patcher_thread();
 }
