@@ -252,7 +252,11 @@ static int s_winebus_patched = 0;
  * is the .text segment, which lives at a higher address and starts
  * partway into the file — its first bytes are code, not ELFMAG. The
  * earlier filter on r-xp landed at 0x74f89ca000 which failed the
- * ELFMAG check in patch_winebus_at_base. */
+ * ELFMAG check in patch_winebus_at_base.
+ *
+ * Diagnostics: log every winebus.so candidate line so we can see (a)
+ * whether the lib is loaded at all and (b) which mapping perms appear.
+ * Limited to the first few candidates to avoid log spam. */
 static int find_winebus_base(uintptr_t *out_base)
 {
     FILE *f = fopen("/proc/self/maps", "r");
@@ -260,11 +264,19 @@ static int find_winebus_base(uintptr_t *out_base)
     char line[1024];
     uintptr_t lowest = 0;
     int found = 0;
+    int candidates = 0;
     while (fgets(line, sizeof(line), f)) {
         /* Format: "start-end perms offset dev inode pathname" */
         if (!strstr(line, "winebus.so")) continue;
         unsigned long start, end;
         if (sscanf(line, "%lx-%lx", &start, &end) != 2) continue;
+        if (candidates < 6) {
+            /* Strip trailing newline for cleaner log output. */
+            size_t L = strlen(line);
+            if (L > 0 && line[L - 1] == '\n') line[L - 1] = '\0';
+            LOG("winebus map: %s", line);
+            candidates++;
+        }
         if (!found || (uintptr_t)start < lowest) {
             lowest = (uintptr_t)start;
             found = 1;
@@ -273,6 +285,27 @@ static int find_winebus_base(uintptr_t *out_base)
     fclose(f);
     if (found) *out_base = lowest;
     return found;
+}
+
+/* Read /proc/self/cmdline and copy the basename of argv[0] into `out` for
+ * diagnostic logging. This lets us correlate which Wine PE module each
+ * patcher firing corresponds to (services.exe, winedevice.exe, etc.). */
+static void read_self_cmdline(char *out, size_t out_size)
+{
+    out[0] = '\0';
+    FILE *f = fopen("/proc/self/cmdline", "r");
+    if (!f) return;
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) return;
+    buf[n] = '\0';
+    /* cmdline uses NUL separators; we just want enough to identify. Replace
+     * NULs with spaces for readability, capped at out_size. */
+    for (size_t i = 0; i < n && i + 1 < out_size; i++) {
+        out[i] = buf[i] ? buf[i] : ' ';
+        out[i + 1] = '\0';
+    }
 }
 
 /* Walk the in-memory ELF at `base`, find the SDL_JoystickRumble GOT slot,
@@ -366,12 +399,16 @@ static void *one_shot_patcher_thread(void *arg)
     sleep(5);
     if (s_winebus_patched) return NULL;
 
+    char cmd[256];
+    read_self_cmdline(cmd, sizeof(cmd));
+    LOG("patcher fire pid=%d cmd=%s", (int)getpid(), cmd);
+
     uintptr_t base = 0;
     if (!find_winebus_base(&base)) {
-        /* winebus.so not loaded in this process. Quietly exit — most
-         * Wine subprocesses don't load it; only winedevice.exe does. */
+        LOG("patcher: winebus.so not loaded in pid=%d", (int)getpid());
         return NULL;
     }
+    LOG("patcher: winebus.so base=0x%lx pid=%d", (unsigned long)base, (int)getpid());
     if (patch_winebus_at_base(base)) {
         s_winebus_patched = 1;
     }
