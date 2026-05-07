@@ -17,6 +17,7 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -63,21 +64,30 @@ public class BhVibrationSettingsActivity extends Activity {
         ctl.init(this);
         ctl.setContainerForSettings(gameId);
 
+        // Compact landscape layout: tighter paddings, smaller fonts, no
+        // long description block. Wraps in a ScrollView so any future
+        // additions or larger system font sizes can scroll instead of
+        // clipping the title or Close button off-screen.
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(24), dp(20), dp(24), dp(20));
+        root.setPadding(dp(20), dp(14), dp(20), dp(14));
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(0xFF1B1B1B);
         bg.setCornerRadius(dp(12));
         root.setBackground(bg);
 
+        // Title row: "PC Vibration Settings" on left, game name on right.
+        // Single line, saves vertical space vs stacking.
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView title = new TextView(this);
         title.setText("PC Vibration Settings");
         title.setTextColor(Color.WHITE);
-        title.setTextSize(18);
+        title.setTextSize(16);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(0, 0, 0, dp(4));
-        root.addView(title);
+        titleRow.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView subtitle = new TextView(this);
         if (gameName != null && !gameName.isEmpty()) {
@@ -85,27 +95,35 @@ public class BhVibrationSettingsActivity extends Activity {
         } else if (gameId != null && !gameId.isEmpty()) {
             subtitle.setText("Game " + gameId);
         } else {
-            subtitle.setText("Global defaults");
+            subtitle.setText("Global");
         }
         subtitle.setTextColor(0xFFFFD54F);
-        subtitle.setTextSize(13);
-        subtitle.setPadding(0, 0, 0, dp(12));
-        root.addView(subtitle);
+        subtitle.setTextSize(12);
+        subtitle.setSingleLine(true);
+        subtitle.setMaxWidth(dp(160));
+        subtitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        titleRow.addView(subtitle);
 
-        TextView desc = new TextView(this);
-        desc.setText("Routes XInput rumble (low/high motor) from this Wine game to the controller, the phone, or both. Stored with the game's other PC settings.");
-        desc.setTextColor(0xFFBBBBBB);
-        desc.setTextSize(12);
-        desc.setPadding(0, 0, 0, dp(16));
-        root.addView(desc);
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        titleLp.bottomMargin = dp(10);
+        titleRow.setLayoutParams(titleLp);
+        root.addView(titleRow);
 
-        // ── Mode ────────────────────────────────────────────────────────────
+        // ── Mode + Intensity in a single row (left = mode, right = intensity)
+        // to keep the dialog short enough for landscape phone screens.
+        LinearLayout controlsRow = new LinearLayout(this);
+        controlsRow.setOrientation(LinearLayout.HORIZONTAL);
+
+        LinearLayout modeCol = new LinearLayout(this);
+        modeCol.setOrientation(LinearLayout.VERTICAL);
+
         TextView modeLabel = new TextView(this);
         modeLabel.setText("Mode");
         modeLabel.setTextColor(Color.WHITE);
-        modeLabel.setTextSize(14);
-        modeLabel.setPadding(0, 0, 0, dp(6));
-        root.addView(modeLabel);
+        modeLabel.setTextSize(13);
+        modeLabel.setPadding(0, 0, 0, dp(4));
+        modeCol.addView(modeLabel);
 
         final Spinner modeSpinner = new Spinner(this);
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
@@ -113,45 +131,61 @@ public class BhVibrationSettingsActivity extends Activity {
                 new String[] { "Off", "Controller", "Device", "Both" });
         modeSpinner.setAdapter(adapter);
         modeSpinner.setSelection(clampMode(ctl.getMode()));
-        root.addView(modeSpinner);
+        modeCol.addView(modeSpinner);
 
-        // ── Intensity ──────────────────────────────────────────────────────
-        LinearLayout intRow = new LinearLayout(this);
-        intRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rowLp.topMargin = dp(16);
-        intRow.setLayoutParams(rowLp);
+        LinearLayout.LayoutParams modeColLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        modeColLp.rightMargin = dp(12);
+        controlsRow.addView(modeCol, modeColLp);
 
+        LinearLayout intCol = new LinearLayout(this);
+        intCol.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout intLabelRow = new LinearLayout(this);
+        intLabelRow.setOrientation(LinearLayout.HORIZONTAL);
+        intLabelRow.setPadding(0, 0, 0, dp(4));
         TextView intLabel = new TextView(this);
         intLabel.setText("Intensity");
         intLabel.setTextColor(Color.WHITE);
-        intLabel.setTextSize(14);
-        intRow.addView(intLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        intLabel.setTextSize(13);
+        intLabelRow.addView(intLabel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         final TextView intValue = new TextView(this);
         intValue.setText(ctl.getIntensity() + "%");
         intValue.setTextColor(0xFFFFD54F);
-        intValue.setTextSize(14);
-        intRow.addView(intValue);
-        root.addView(intRow);
+        intValue.setTextSize(13);
+        intLabelRow.addView(intValue);
+        intCol.addView(intLabelRow);
 
         final SeekBar bar = new SeekBar(this);
         bar.setMax(100);
         bar.setProgress(ctl.getIntensity());
-        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        barLp.topMargin = dp(4);
-        bar.setLayoutParams(barLp);
-        root.addView(bar);
+        intCol.addView(bar);
 
-        // ── Save / Close ───────────────────────────────────────────────────
+        controlsRow.addView(intCol, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
+
+        root.addView(controlsRow);
+
+        // Tiny one-line tip — much shorter than the previous paragraph
+        // and only really useful on first launch. Ellipsizes if too long.
+        TextView desc = new TextView(this);
+        desc.setText("Settings save to this game's PC config (export/import compatible).");
+        desc.setTextColor(0xFF999999);
+        desc.setTextSize(11);
+        LinearLayout.LayoutParams descLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        descLp.topMargin = dp(8);
+        desc.setLayoutParams(descLp);
+        root.addView(desc);
+
+        // ── Close ──────────────────────────────────────────────────────────
         LinearLayout btnRow = new LinearLayout(this);
         btnRow.setOrientation(LinearLayout.HORIZONTAL);
         btnRow.setGravity(Gravity.END);
         LinearLayout.LayoutParams btnRowLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        btnRowLp.topMargin = dp(20);
+        btnRowLp.topMargin = dp(8);
         btnRow.setLayoutParams(btnRowLp);
 
         Button close = new Button(this);
@@ -178,12 +212,39 @@ public class BhVibrationSettingsActivity extends Activity {
             @Override public void onStopTrackingTouch(SeekBar sb) { }
         });
 
+        // Wrap in a ScrollView so the dialog tolerates taller-than-expected
+        // content (large system fonts, narrow landscape splits) without
+        // ever clipping the title at the top or Close at the bottom.
+        // Background lives on the LinearLayout (rounded corners), ScrollView
+        // stays transparent.
+        ScrollView scroller = new ScrollView(this);
+        scroller.setVerticalScrollBarEnabled(true);
+        scroller.addView(root);
+
         FrameLayout wrapper = new FrameLayout(this);
         wrapper.setBackgroundColor(0x00000000);
-        FrameLayout.LayoutParams rootLp = new FrameLayout.LayoutParams(
-                dp(360), FrameLayout.LayoutParams.WRAP_CONTENT);
-        rootLp.gravity = Gravity.CENTER;
-        wrapper.addView(root, rootLp);
+        // ~480 dp wide so the side-by-side Mode/Intensity row doesn't squeeze
+        // the Spinner. Height capped at 85 % of the screen — anything taller
+        // becomes scrollable rather than clipped.
+        int maxH = (int) (getResources().getDisplayMetrics().heightPixels * 0.85f);
+        FrameLayout.LayoutParams scLp = new FrameLayout.LayoutParams(
+                dp(480), ViewGroup.LayoutParams.WRAP_CONTENT);
+        scLp.gravity = Gravity.CENTER;
+        wrapper.addView(scroller, scLp);
+        scroller.getLayoutParams().height = ViewGroup.LayoutParams.WRAP_CONTENT;
+        // Manually clamp height after first measure.
+        final int finalMaxH = maxH;
+        final ScrollView finalScroller = scroller;
+        scroller.post(new Runnable() {
+            @Override public void run() {
+                if (finalScroller.getHeight() > finalMaxH) {
+                    ViewGroup.LayoutParams lp = finalScroller.getLayoutParams();
+                    lp.height = finalMaxH;
+                    finalScroller.setLayoutParams(lp);
+                }
+            }
+        });
+
         setContentView(wrapper);
     }
 
