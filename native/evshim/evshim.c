@@ -347,6 +347,16 @@ static int patch_winebus_at_base(uintptr_t base)
     const uint8_t   *jmprel = NULL;
     size_t           jmprelsz = 0;
     int              pltrel_type = DT_RELA;
+    /* DT_RELA holds the regular dynamic relocation table — needed for
+     * non-PLT GOT references (R_AARCH64_GLOB_DAT). When the compiler
+     * emits a function call as an indirect GOT load instead of a PLT
+     * jump (e.g. -fno-plt, or weak refs, or some Wine PE-bridge code),
+     * the relocation is in DT_RELA, not DT_JMPREL. The previous
+     * iteration only walked DT_JMPREL and missed it — winebus.so
+     * logged "n=34" PLT relocs but no SDL_JoystickRumble entry. */
+    const uint8_t   *rela = NULL;
+    size_t           relasz = 0;
+    size_t           relaent = sizeof(ElfW(Rela));
 
     for (ElfW(Dyn) *d = dyn; d->d_tag != DT_NULL; d++) {
         switch (d->d_tag) {
@@ -355,45 +365,68 @@ static int patch_winebus_at_base(uintptr_t base)
             case DT_JMPREL:   jmprel = (const uint8_t *)(base + d->d_un.d_ptr); break;
             case DT_PLTRELSZ: jmprelsz = d->d_un.d_val; break;
             case DT_PLTREL:   pltrel_type = (int)d->d_un.d_val; break;
+            case DT_RELA:     rela = (const uint8_t *)(base + d->d_un.d_ptr); break;
+            case DT_RELASZ:   relasz = d->d_un.d_val; break;
+            case DT_RELAENT:  relaent = d->d_un.d_val; break;
             default: break;
         }
     }
-    if (!symtab || !strtab || !jmprel || jmprelsz == 0) {
-        LOG("winebus: dyn missing symtab/strtab/jmprel");
+    if (!symtab || !strtab) {
+        LOG("winebus: dyn missing symtab/strtab");
         return 0;
     }
+
+    long page_size = sysconf(_SC_PAGESIZE);
+    int patched = 0;
+
+    /* Walk DT_JMPREL (PLT relocations) and DT_RELA (regular dynamic
+     * relocations). PLT covers normal function calls; regular RELA
+     * covers non-PLT GOT references like R_AARCH64_GLOB_DAT, which
+     * winebus.so apparently uses for SDL_JoystickRumble (the previous
+     * JMPREL-only walk found 34 entries but no SDL_JoystickRumble).
+     * Two passes: same matching logic, different table pointers. */
+    const uint8_t *tables[2]   = { jmprel, rela };
+    size_t         tablesz[2]  = { jmprelsz, relasz };
+    size_t         entsize[2]  = { sizeof(ElfW(Rela)), relaent };
+    const char    *which[2]    = { "JMPREL", "RELA" };
+    int            do_table[2] = { (pltrel_type == DT_RELA) ? 1 : 0, 1 };
+
     if (pltrel_type != DT_RELA) {
-        LOG("winebus: PLT type=%d not RELA", pltrel_type);
-        return 0;
+        LOG("winebus: PLT type=%d not RELA — skipping JMPREL scan", pltrel_type);
     }
 
-    size_t entsize = sizeof(ElfW(Rela));
-    size_t n = jmprelsz / entsize;
-    for (size_t i = 0; i < n; i++) {
-        const ElfW(Rela) *r = (const ElfW(Rela) *)(jmprel + i * entsize);
-        size_t sym_idx = ELF64_R_SYM(r->r_info);
-        const char *sym_name = strtab + symtab[sym_idx].st_name;
-        if (strcmp(sym_name, "SDL_JoystickRumble") != 0) continue;
+    for (int t = 0; t < 2; t++) {
+        if (!do_table[t] || !tables[t] || tablesz[t] == 0) continue;
+        size_t n = tablesz[t] / entsize[t];
+        int found_in_table = 0;
+        for (size_t i = 0; i < n; i++) {
+            const ElfW(Rela) *r = (const ElfW(Rela) *)(tables[t] + i * entsize[t]);
+            size_t sym_idx = ELF64_R_SYM(r->r_info);
+            if (sym_idx == 0) continue;
+            const char *sym_name = strtab + symtab[sym_idx].st_name;
+            if (strcmp(sym_name, "SDL_JoystickRumble") != 0) continue;
 
-        void **slot = (void **)(base + r->r_offset);
-        void  *old  = *slot;
+            void **slot = (void **)(base + r->r_offset);
+            void  *old  = *slot;
+            uintptr_t page_addr = (uintptr_t)slot & ~((uintptr_t)page_size - 1);
+            if (mprotect((void *)page_addr, (size_t)page_size,
+                         PROT_READ | PROT_WRITE) != 0) {
+                LOGE("got_patch winebus: mprotect failed: %s", strerror(errno));
+                continue;
+            }
+            *slot = (void *)&SDL_JoystickRumble;
+            mprotect((void *)page_addr, (size_t)page_size, PROT_READ);
 
-        long page_size = sysconf(_SC_PAGESIZE);
-        uintptr_t page_addr = (uintptr_t)slot & ~((uintptr_t)page_size - 1);
-        if (mprotect((void *)page_addr, (size_t)page_size,
-                     PROT_READ | PROT_WRITE) != 0) {
-            LOGE("got_patch winebus: mprotect failed: %s", strerror(errno));
-            return 0;
+            LOG("got_patch winebus.so (%s): SDL_JoystickRumble slot=%p old=%p new=%p",
+                which[t], (void *)slot, old, (void *)&SDL_JoystickRumble);
+            patched = 1;
+            found_in_table = 1;
         }
-        *slot = (void *)&SDL_JoystickRumble;
-        mprotect((void *)page_addr, (size_t)page_size, PROT_READ);
-
-        LOG("got_patch winebus.so: SDL_JoystickRumble slot=%p old=%p new=%p",
-            (void *)slot, old, (void *)&SDL_JoystickRumble);
-        return 1;
+        if (!found_in_table) {
+            LOG("winebus: SDL_JoystickRumble not in %s (n=%zu)", which[t], n);
+        }
     }
-    LOG("winebus: SDL_JoystickRumble not in PLT relocations (n=%zu)", n);
-    return 0;
+    return patched;
 }
 
 /* One-shot patcher thread. Runs exactly once, 5 seconds after spawn,
