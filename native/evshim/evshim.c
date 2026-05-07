@@ -335,8 +335,13 @@ static int patch_winebus_at_base(uintptr_t base)
 
     ElfW(Dyn) *dyn = (ElfW(Dyn) *)(base + dynp->p_vaddr);
 
-    /* On bionic, dynamic table d_ptr fields are absolute runtime addresses
-     * (the linker rewrites them after load). */
+    /* Bionic's linker does NOT rewrite the in-memory dynamic table — it
+     * reads d_un.d_ptr as a load-bias-relative offset and adds load_bias
+     * at the consumer site (see soinfo::prelink_image in AOSP linker.cpp).
+     * So we must add `base` ourselves. The earlier version of this code
+     * treated d_ptr as already-absolute, which dereferenced tiny offsets
+     * like 0x1000 as pointers and SIGSEGV'd winedevice.exe — taking out
+     * the HID stack and breaking all controller input. */
     const ElfW(Sym) *symtab = NULL;
     const char      *strtab = NULL;
     const uint8_t   *jmprel = NULL;
@@ -345,9 +350,9 @@ static int patch_winebus_at_base(uintptr_t base)
 
     for (ElfW(Dyn) *d = dyn; d->d_tag != DT_NULL; d++) {
         switch (d->d_tag) {
-            case DT_SYMTAB:   symtab = (const ElfW(Sym) *)d->d_un.d_ptr; break;
-            case DT_STRTAB:   strtab = (const char *)d->d_un.d_ptr; break;
-            case DT_JMPREL:   jmprel = (const uint8_t *)d->d_un.d_ptr; break;
+            case DT_SYMTAB:   symtab = (const ElfW(Sym) *)(base + d->d_un.d_ptr); break;
+            case DT_STRTAB:   strtab = (const char *)(base + d->d_un.d_ptr); break;
+            case DT_JMPREL:   jmprel = (const uint8_t *)(base + d->d_un.d_ptr); break;
             case DT_PLTRELSZ: jmprelsz = d->d_un.d_val; break;
             case DT_PLTREL:   pltrel_type = (int)d->d_un.d_val; break;
             default: break;
