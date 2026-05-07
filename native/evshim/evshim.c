@@ -217,56 +217,88 @@ void SDL_JoystickClose(SDL_Joystick *js)
     }
 }
 
-/* ─── GOT/PLT patcher for winebus.so (silent) ─────────────────────────────
+/* ─── GOT/PLT patcher for winebus.so — try 5: linker-free ────────────────
  *
- * LD_PRELOAD interposition is not enough on this Wine fork: libvfs.so's
- * dlopen of libSDL2 puts its symbols in a private linker namespace that
- * winebus.so's NEEDED libSDL2 reuses, so winebus's SDL_JoystickRumble
- * lookups never reach our globally preloaded wrapper.
+ * The previous four iterations all touched the bionic linker in some way
+ * (dl_iterate_phdr, dlopen interpose, dlsym during init) and each broke
+ * something subtly different — deadlock, launch crash, input pipeline
+ * stalling after first poll, etc. The bionic linker's interaction with
+ * Wine's unusual loader is fragile.
  *
- * Workaround: walk winebus.so's PLT relocation table at runtime, find the
- * GOT slot for SDL_JoystickRumble, and overwrite it with the address of
- * our wrapper. Subsequent calls go through us regardless of which libSDL2
- * instance was bound at load time.
+ * Try 5 avoids the linker entirely:
+ *   - Reads /proc/self/maps to find winebus.so's load address (just file
+ *     I/O, no locks held).
+ *   - Walks the in-memory ELF directly: e_phoff → PT_DYNAMIC → DT_JMPREL,
+ *     DT_SYMTAB, DT_STRTAB → PLT relocations → SDL_JoystickRumble GOT slot.
+ *   - mprotect the page writable, overwrite the slot, mprotect back.
  *
- * Two trigger paths to catch winebus.so's load:
- *   1) dlopen interposition (primary) — fires the moment winebus.so is
- *      dlopen'd. Zero log overhead during normal library loading.
- *   2) Slow 10 s polling (backup) — only logs on SUCCESS, never enumerates
- *      libraries (was the log-storm cause that bricked launch in try 3).
+ * Single one-shot attempt 5 seconds after libevshim's constructor, on a
+ * detached thread that exits immediately after attempting. NO periodic
+ * activity, NO dl_iterate_phdr, NO dlopen interpose, NO ongoing thread.
+ * If 5 s is too soon (winebus.so not loaded yet), the patch silently
+ * fails and we fall back to host-side suppression. From earlier traces
+ * winebus.so loads ~62 ms after evshim's ctor in winedevice.exe, so 5 s
+ * is generous.
  */
-
-typedef struct {
-    const char *target_lib;
-    const char *target_sym;
-    void       *new_func;
-    int         patched;
-} got_patch_ctx_t;
 
 static int s_winebus_patched = 0;
 
-static int got_patch_iter(struct dl_phdr_info *info, size_t size, void *data)
+/* Find the start address of winebus.so's executable mapping in /proc/self/maps.
+ * Returns 1 with *out_base set on success, 0 if not found. No locks. */
+static int find_winebus_base(uintptr_t *out_base)
 {
-    (void)size;
-    got_patch_ctx_t *ctx = (got_patch_ctx_t *)data;
-    if (ctx->patched) return 1;
-
-    const char *name = info->dlpi_name;
-    if (!name || !*name) return 0;
-    if (!strstr(name, ctx->target_lib)) return 0;
-
-    /* Found a match. Now find PT_DYNAMIC and walk the PLT relocations. */
-    const ElfW(Phdr) *dynp = NULL;
-    for (int i = 0; i < info->dlpi_phnum; i++) {
-        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
-            dynp = &info->dlpi_phdr[i];
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    char line[1024];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        /* Format: "start-end perms offset dev inode pathname"
+         * We want the executable mapping (r-xp) of winebus.so. */
+        if (!strstr(line, "winebus.so")) continue;
+        const char *space = strchr(line, ' ');
+        if (!space) continue;
+        const char *perms = space + 1;
+        if (perms[0] != 'r' || perms[2] != 'x') continue;
+        unsigned long start, end;
+        if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
+            *out_base = (uintptr_t)start;
+            found = 1;
             break;
         }
     }
-    if (!dynp) return 0;
+    fclose(f);
+    return found;
+}
 
-    ElfW(Dyn) *dyn = (ElfW(Dyn) *)((uintptr_t)info->dlpi_addr + dynp->p_vaddr);
+/* Walk the in-memory ELF at `base`, find the SDL_JoystickRumble GOT slot,
+ * and patch it to point at our wrapper. Pure pointer arithmetic + mprotect;
+ * no linker calls. Returns 1 on success. */
+static int patch_winebus_at_base(uintptr_t base)
+{
+    const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *)base;
+    if (eh->e_ident[EI_MAG0] != ELFMAG0 || eh->e_ident[EI_MAG1] != ELFMAG1 ||
+        eh->e_ident[EI_MAG2] != ELFMAG2 || eh->e_ident[EI_MAG3] != ELFMAG3) {
+        LOGE("winebus base=%p not ELF", (void *)base);
+        return 0;
+    }
 
+    const ElfW(Phdr) *ph = (const ElfW(Phdr) *)(base + eh->e_phoff);
+    const ElfW(Phdr) *dynp = NULL;
+    for (int i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type == PT_DYNAMIC) {
+            dynp = &ph[i];
+            break;
+        }
+    }
+    if (!dynp) {
+        LOG("winebus: no PT_DYNAMIC");
+        return 0;
+    }
+
+    ElfW(Dyn) *dyn = (ElfW(Dyn) *)(base + dynp->p_vaddr);
+
+    /* On bionic, dynamic table d_ptr fields are absolute runtime addresses
+     * (the linker rewrites them after load). */
     const ElfW(Sym) *symtab = NULL;
     const char      *strtab = NULL;
     const uint8_t   *jmprel = NULL;
@@ -283,8 +315,14 @@ static int got_patch_iter(struct dl_phdr_info *info, size_t size, void *data)
             default: break;
         }
     }
-    if (!symtab || !strtab || !jmprel || jmprelsz == 0) return 0;
-    if (pltrel_type != DT_RELA) return 0;
+    if (!symtab || !strtab || !jmprel || jmprelsz == 0) {
+        LOG("winebus: dyn missing symtab/strtab/jmprel");
+        return 0;
+    }
+    if (pltrel_type != DT_RELA) {
+        LOG("winebus: PLT type=%d not RELA", pltrel_type);
+        return 0;
+    }
 
     size_t entsize = sizeof(ElfW(Rela));
     size_t n = jmprelsz / entsize;
@@ -292,72 +330,48 @@ static int got_patch_iter(struct dl_phdr_info *info, size_t size, void *data)
         const ElfW(Rela) *r = (const ElfW(Rela) *)(jmprel + i * entsize);
         size_t sym_idx = ELF64_R_SYM(r->r_info);
         const char *sym_name = strtab + symtab[sym_idx].st_name;
-        if (strcmp(sym_name, ctx->target_sym) != 0) continue;
+        if (strcmp(sym_name, "SDL_JoystickRumble") != 0) continue;
 
-        void **slot = (void **)((uintptr_t)info->dlpi_addr + r->r_offset);
+        void **slot = (void **)(base + r->r_offset);
         void  *old  = *slot;
 
         long page_size = sysconf(_SC_PAGESIZE);
         uintptr_t page_addr = (uintptr_t)slot & ~((uintptr_t)page_size - 1);
         if (mprotect((void *)page_addr, (size_t)page_size,
                      PROT_READ | PROT_WRITE) != 0) {
-            LOGE("got_patch %s: mprotect failed: %s", name, strerror(errno));
+            LOGE("got_patch winebus: mprotect failed: %s", strerror(errno));
             return 0;
         }
-        *slot = ctx->new_func;
+        *slot = (void *)&SDL_JoystickRumble;
         mprotect((void *)page_addr, (size_t)page_size, PROT_READ);
 
-        LOG("got_patch %s: %s slot=%p old=%p new=%p",
-            name, ctx->target_sym, (void *)slot, old, ctx->new_func);
-        ctx->patched = 1;
+        LOG("got_patch winebus.so: SDL_JoystickRumble slot=%p old=%p new=%p",
+            (void *)slot, old, (void *)&SDL_JoystickRumble);
         return 1;
     }
+    LOG("winebus: SDL_JoystickRumble not in PLT relocations (n=%zu)", n);
     return 0;
 }
 
-static int try_patch_winebus(void)
-{
-    if (s_winebus_patched) return 1;
-    got_patch_ctx_t ctx = {
-        .target_lib = "winebus.so",
-        .target_sym = "SDL_JoystickRumble",
-        .new_func   = (void *)&SDL_JoystickRumble,
-        .patched    = 0,
-    };
-    dl_iterate_phdr(got_patch_iter, &ctx);
-    if (ctx.patched) {
-        s_winebus_patched = 1;
-        return 1;
-    }
-    return 0;
-}
-
-/* Slow polling fallback. 10 s cadence is gentle enough not to interfere
- * with any other process activity (linker locks, log volume, etc.). The
- * dlopen interpose below is the primary trigger; this just covers the
- * unlikely case Wine loads winebus.so via an internal mechanism that
- * bypasses standard dlopen. */
-static void *got_patcher_thread(void *arg)
+/* One-shot patcher thread. Runs exactly once, 5 seconds after spawn,
+ * then exits. No polling, no periodic activity. */
+static void *one_shot_patcher_thread(void *arg)
 {
     (void)arg;
-    while (!s_winebus_patched) {
-        sleep(10);
-        try_patch_winebus();
+    sleep(5);
+    if (s_winebus_patched) return NULL;
+
+    uintptr_t base = 0;
+    if (!find_winebus_base(&base)) {
+        /* winebus.so not loaded in this process. Quietly exit — most
+         * Wine subprocesses don't load it; only winedevice.exe does. */
+        return NULL;
+    }
+    if (patch_winebus_at_base(base)) {
+        s_winebus_patched = 1;
     }
     return NULL;
 }
-
-/* No dlopen interpose. Earlier attempts (try 4 inline patch, try 4b
- * spawn-thread-from-dlopen) both broke launch. Try 4 hung in linker
- * deadlock (dl_iterate_phdr inside dlopen's writer lock); try 4b made
- * Wine subprocesses exit before even reaching winebus.so load — root
- * cause unclear but pthread_create from within dlopen interpose seems
- * to interfere with Wine's startup somehow.
- *
- * We rely on the polling thread alone now. Cadence is 10 s, so the
- * patch lands within 10 s of winebus.so loading. Wine's HID stack
- * init typically completes long before any user input triggers
- * rumble, so the delay is invisible in practice. */
 
 /* Force libSDL2-2.0.so into the global linker namespace before libvfs.so
  * gets a chance to dlopen it RTLD_LOCAL. Without this, libvfs.so's later
@@ -401,19 +415,18 @@ static void evshim_ctor(void)
     resolve_real();
     LOG("ctor resolved real_SDL_JoystickRumble=%p", (void *)real_SDL_JoystickRumble);
 
-    /* GOT-patcher disabled. Multiple iterations (try 4 inline, try 4b
-     * deferred-thread, try 4c polling-only) all introduced regressions
-     * where Wine's input/rumble pipeline broke after a couple of rumble
-     * events — even when the patcher itself never fired. Likely cause:
-     * any periodic dl_iterate_phdr from a background thread interferes
-     * with Wine's HID stack subtly enough to be hard to pin down.
+    /* Spawn the one-shot patcher thread. Sleeps 5 s, reads /proc/self/maps
+     * to find winebus.so, walks its in-memory ELF, patches the GOT slot.
+     * No linker calls. Single attempt. Thread exits after one try.
      *
-     * Falling back to pure host-side SDL phantom suppression with a
-     * bounded timeout (BhVibrationController). That gave the user
-     * "Good!" feedback last time, just with ~1 s lag after release.
-     * Worth shipping vs continuing to chase the GOT path that keeps
-     * breaking things.
+     * In Wine subprocesses that don't load winebus.so (most of them),
+     * find_winebus_base returns 0 and the thread quietly exits. Only
+     * winedevice.exe will actually patch.
      */
-    (void)try_patch_winebus;       /* silence unused-function warning */
-    (void)got_patcher_thread;
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, one_shot_patcher_thread, NULL) == 0) {
+        pthread_detach(tid);
+    } else {
+        LOGE("ctor: pthread_create for patcher failed: %s", strerror(errno));
+    }
 }
