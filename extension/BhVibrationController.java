@@ -545,6 +545,19 @@ public final class BhVibrationController {
         if (dir == null) return;
         if (!readinessWatcherStarted.compareAndSet(false, true)) return;
 
+        // Delete any stale marker left over from a previous app session.
+        // The marker indicates "winedevice's libvfs is ready" but it's
+        // valid only for the *current* winedevice process. On a fresh
+        // BannerHub launch, the previous marker is meaningless — if we
+        // saw it, we'd fire the wake-up before the new winedevice's
+        // libvfs has come up. Force evshim's next write to be a fresh
+        // CREATE event we can trust.
+        File staleMarker = new File(dir, READY_MARKER_NAME);
+        if (staleMarker.exists()) {
+            boolean deleted = staleMarker.delete();
+            Log.i(TAG, "deleted stale ready marker (deleted=" + deleted + ")");
+        }
+
         // Watch CREATE (fresh marker after a winedevice respawn — evshim
         // unlinks before recreating to guarantee this fires) and MODIFY
         // (in case the unlink races with FileObserver registration).
