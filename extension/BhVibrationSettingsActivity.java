@@ -133,9 +133,12 @@ public class BhVibrationSettingsActivity extends Activity {
         modeSpinner.setSelection(clampMode(ctl.getMode()));
         modeCol.addView(modeSpinner);
 
+        // Mode column: wrap_content so the spinner is wide enough to render
+        // "Controller" (the longest option label) without truncating to
+        // "Control.." Intensity below takes the remaining space.
         LinearLayout.LayoutParams modeColLp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        modeColLp.rightMargin = dp(12);
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        modeColLp.rightMargin = dp(16);
         controlsRow.addView(modeCol, modeColLp);
 
         LinearLayout intCol = new LinearLayout(this);
@@ -163,7 +166,7 @@ public class BhVibrationSettingsActivity extends Activity {
         intCol.addView(bar);
 
         controlsRow.addView(intCol, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f));
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         root.addView(controlsRow);
 
