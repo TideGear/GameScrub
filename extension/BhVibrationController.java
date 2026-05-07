@@ -504,6 +504,11 @@ public final class BhVibrationController {
     private final Map<Integer, Object> pendingWakeups = new ConcurrentHashMap<>();
     private final AtomicBoolean readinessWatcherStarted = new AtomicBoolean(false);
     private volatile FileObserver readinessObserver;
+    // Cache reflection lookups — the GamepadServerManager and GamepadState
+    // classes are the same across every wake-up. Volatile so the
+    // benign-race "look up twice" on first cold start is safe.
+    private volatile Method cachedGetStateMethod;
+    private volatile Method cachedWriteButtonMethod;
 
     private void handleScheduleWakeup(final Object serverManager, final int slot) {
         if (serverManager == null || slot < 0 || slot >= MAX_SLOTS) {
@@ -589,9 +594,13 @@ public final class BhVibrationController {
 
     private void fireWakeup(Object serverManager, final int slot) {
         try {
-            Method getState = serverManager.getClass()
-                    .getDeclaredMethod("g", int.class);
-            getState.setAccessible(true);
+            Method getState = cachedGetStateMethod;
+            if (getState == null) {
+                getState = serverManager.getClass()
+                        .getDeclaredMethod("g", int.class);
+                getState.setAccessible(true);
+                cachedGetStateMethod = getState;
+            }
             final Object state = getState.invoke(serverManager, slot);
             if (state == null) {
                 Log.i(TAG, "wake-up: no GamepadState for slot " + slot);
@@ -602,21 +611,28 @@ public final class BhVibrationController {
             // *drops* button events on unregistered SDL_JoystickIDs (just
             // logs a WARN — confirmed reading wine-10.0 source), so a
             // button event on the SDL queue isn't what wakes things. The
-            // real wake-up must come from libvfs lazily emitting
-            // SDL_JOYDEVICEADDED on first-input — which axis flicker
-            // failed to trigger reliably for some slots in multi-controller
-            // setups, but a button STATE change might (libvfs's poller
-            // may check button bytes for the lazy-attach trigger).
+            // real wake-up comes from libvfs lazily emitting
+            // SDL_JOYDEVICEADDED on first-input. Empirically axis flicker
+            // failed for some slots in multi-controller setups but button
+            // flicker works (libvfs's poller appears to check button
+            // bytes for the lazy-attach trigger).
             //
             // Use button index 14 — outermost reachable via GamepadState.b
-            // (range check is `p1 < 0xf`) and unmapped by every common
-            // XInput game we care about. Sequence: press, then release
-            // 50 ms later. If the user is genuinely pressing button 14
-            // mid-flicker the natural input pipeline overwrites within
-            // ~16 ms; net effect is still a state change libvfs notices.
-            final Method writeButton = state.getClass()
-                    .getDeclaredMethod("b", int.class, boolean.class);
-            writeButton.setAccessible(true);
+            // (range check is `p1 < 0xf`, i.e. < 15) and unmapped by every
+            // XInput game (XInput defines 14 buttons, indices 0..13).
+            // Sequence: press, then release 50 ms later. If the user is
+            // genuinely chording button 14 mid-flicker the natural-input
+            // pipeline overwrites within ~16 ms; net effect is still a
+            // state change libvfs notices.
+            final Method writeButton;
+            Method cached = cachedWriteButtonMethod;
+            if (cached == null) {
+                cached = state.getClass()
+                        .getDeclaredMethod("b", int.class, boolean.class);
+                cached.setAccessible(true);
+                cachedWriteButtonMethod = cached;
+            }
+            writeButton = cached;
             final int wakeButton = 14;
             writeButton.invoke(state, wakeButton, true);
             Log.i(TAG, "wake-up fired slot=" + slot

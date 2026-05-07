@@ -228,28 +228,22 @@ void SDL_JoystickClose(SDL_Joystick *js)
     }
 }
 
-/* ─── GOT/PLT patcher for winebus.so — try 5: linker-free ────────────────
+/* ─── GOT/.bss patcher for winebus.so ─────────────────────────────────────
  *
- * The previous four iterations all touched the bionic linker in some way
- * (dl_iterate_phdr, dlopen interpose, dlsym during init) and each broke
- * something subtly different — deadlock, launch crash, input pipeline
- * stalling after first poll, etc. The bionic linker's interaction with
- * Wine's unusual loader is fragile.
- *
- * Try 5 avoids the linker entirely:
- *   - Reads /proc/self/maps to find winebus.so's load address (just file
+ * Linker-free: bionic's loader interacts poorly with Wine's, so we avoid
+ * dl_iterate_phdr / dlopen interpose / dlsym during init. Instead:
+ *   - Read /proc/self/maps to find winebus.so's load address (just file
  *     I/O, no locks held).
- *   - Walks the in-memory ELF directly: e_phoff → PT_DYNAMIC → DT_JMPREL,
- *     DT_SYMTAB, DT_STRTAB → PLT relocations → SDL_JoystickRumble GOT slot.
- *   - mprotect the page writable, overwrite the slot, mprotect back.
+ *   - Walk the in-memory ELF directly via e_phoff → PT_LOAD program
+ *     headers, scanning writable segments for the dlsym'd pSDL_*
+ *     function pointers (winebus uses dlopen+dlsym, not static linking).
+ *   - mprotect the page writable, overwrite each match.
  *
- * Single one-shot attempt 5 seconds after libevshim's constructor, on a
- * detached thread that exits immediately after attempting. NO periodic
- * activity, NO dl_iterate_phdr, NO dlopen interpose, NO ongoing thread.
- * If 5 s is too soon (winebus.so not loaded yet), the patch silently
- * fails and we fall back to host-side suppression. From earlier traces
- * winebus.so loads ~62 ms after evshim's ctor in winedevice.exe, so 5 s
- * is generous.
+ * Single one-shot attempt 5 seconds after libevshim's constructor on a
+ * detached thread that exits immediately after attempting. No periodic
+ * activity, no dl_iterate_phdr, no dlopen interpose, no ongoing thread.
+ * Empirically winebus.so loads ~62 ms after evshim's ctor in
+ * winedevice.exe, so 5 s is generous.
  */
 
 static int s_winebus_patched = 0;
@@ -257,17 +251,14 @@ static int s_winebus_patched = 0;
 /* Find the ELF base address (lowest mapping) of winebus.so in /proc/self/maps.
  * Returns 1 with *out_base set on success, 0 if not found. No locks.
  *
- * Why lowest, not r-xp: the bionic linker mmaps the .so as multiple
- * PT_LOAD segments; the first segment (lowest address) contains the
- * ELF header (file offset 0), typically mapped r--p. The r-xp mapping
- * is the .text segment, which lives at a higher address and starts
- * partway into the file — its first bytes are code, not ELFMAG. The
- * earlier filter on r-xp landed at 0x74f89ca000 which failed the
- * ELFMAG check in patch_winebus_at_base.
+ * Why lowest, not r-xp: bionic mmaps the .so as multiple PT_LOAD
+ * segments; the first segment (lowest address) contains the ELF header
+ * (file offset 0), typically mapped r--p. The r-xp mapping is the
+ * .text segment, which lives at a higher address and starts partway
+ * into the file — its first bytes are code, not ELFMAG.
  *
- * Diagnostics: log every winebus.so candidate line so we can see (a)
- * whether the lib is loaded at all and (b) which mapping perms appear.
- * Limited to the first few candidates to avoid log spam. */
+ * Diagnostics: log every winebus.so candidate line (capped at 6) so we
+ * can see whether the lib is loaded and which mapping perms appear. */
 static int find_winebus_base(uintptr_t *out_base)
 {
     FILE *f = fopen("/proc/self/maps", "r");
@@ -323,13 +314,11 @@ static void read_self_cmdline(char *out, size_t out_size)
  * SDL_JoystickClose) go through our wrappers.
  *
  * winebus.so doesn't link against libSDL2-2.0.so directly (no NEEDED entry,
- * no relocation for SDL_JoystickRumble in either DT_JMPREL or DT_RELA — the
- * previous iteration logged "not in JMPREL (n=34)" and "not in RELA (n=60)").
- * Instead it calls dlopen("libSDL2-2.0.so") in sdl_bus_init, then dlsym's
- * each function name into a static `pSDL_*` table in .bss. The actual call
- * sites do `(*pSDL_JoystickRumble)(...)`. So there's no GOT entry to patch
- * via relocations — we have to patch the function-pointer table after
- * winebus has populated it.
+ * no relocation for SDL_JoystickRumble in DT_JMPREL or DT_RELA). Instead
+ * sdl_bus_init dlopens libSDL2 and dlsym's each function name into a
+ * static `pSDL_*` table in .bss; call sites do `(*pSDL_JoystickRumble)(...)`.
+ * So there's no GOT entry to patch via relocations — we patch the
+ * function-pointer table directly after winebus has populated it.
  *
  * Strategy:
  *   1. Walk PT_LOAD program headers in memory; find writable segments.
