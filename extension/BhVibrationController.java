@@ -618,10 +618,31 @@ public final class BhVibrationController {
 
     private void drainPendingWakeups() {
         if (pendingWakeups.isEmpty()) return;
-        for (Map.Entry<Integer, Object> e : pendingWakeups.entrySet()) {
-            int slot = e.getKey();
-            Object serverManager = e.getValue();
-            fireWakeup(serverManager, slot);
+
+        // Stagger wake-ups across slots in ascending order. With a third
+        // controller in the mix, libvfs's SDL_GameController vs. raw
+        // SDL_Joystick split (the "SDL B / SDL A" distinction Wine joystick
+        // testers expose) seems to depend on lower slots being fully
+        // SDL-registered before higher slots' button events trigger
+        // SDL_JOYDEVICEADDED. Empirically: pressing real buttons on slots
+        // 0+1 also unsticks slot 2's rumble — so slot 2's button-flicker
+        // *did* land in shared memory, libvfs just hadn't started watching
+        // it yet. Firing in ascending order, ~200 ms apart, gives each
+        // slot time to register before the next stimulus arrives.
+        java.util.List<Integer> slots = new java.util.ArrayList<>(pendingWakeups.keySet());
+        java.util.Collections.sort(slots);
+        long delayMs = 0L;
+        for (final int slot : slots) {
+            final Object serverManager = pendingWakeups.get(slot);
+            if (serverManager == null) continue;
+            if (delayMs == 0L) {
+                fireWakeup(serverManager, slot);
+            } else {
+                worker.postDelayed(new Runnable() {
+                    @Override public void run() { fireWakeup(serverManager, slot); }
+                }, delayMs);
+            }
+            delayMs += 200L;
         }
         pendingWakeups.clear();
     }
