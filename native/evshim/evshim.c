@@ -243,30 +243,35 @@ void SDL_JoystickClose(SDL_Joystick *js)
 
 static int s_winebus_patched = 0;
 
-/* Find the start address of winebus.so's executable mapping in /proc/self/maps.
- * Returns 1 with *out_base set on success, 0 if not found. No locks. */
+/* Find the ELF base address (lowest mapping) of winebus.so in /proc/self/maps.
+ * Returns 1 with *out_base set on success, 0 if not found. No locks.
+ *
+ * Why lowest, not r-xp: the bionic linker mmaps the .so as multiple
+ * PT_LOAD segments; the first segment (lowest address) contains the
+ * ELF header (file offset 0), typically mapped r--p. The r-xp mapping
+ * is the .text segment, which lives at a higher address and starts
+ * partway into the file — its first bytes are code, not ELFMAG. The
+ * earlier filter on r-xp landed at 0x74f89ca000 which failed the
+ * ELFMAG check in patch_winebus_at_base. */
 static int find_winebus_base(uintptr_t *out_base)
 {
     FILE *f = fopen("/proc/self/maps", "r");
     if (!f) return 0;
     char line[1024];
+    uintptr_t lowest = 0;
     int found = 0;
     while (fgets(line, sizeof(line), f)) {
-        /* Format: "start-end perms offset dev inode pathname"
-         * We want the executable mapping (r-xp) of winebus.so. */
+        /* Format: "start-end perms offset dev inode pathname" */
         if (!strstr(line, "winebus.so")) continue;
-        const char *space = strchr(line, ' ');
-        if (!space) continue;
-        const char *perms = space + 1;
-        if (perms[0] != 'r' || perms[2] != 'x') continue;
         unsigned long start, end;
-        if (sscanf(line, "%lx-%lx", &start, &end) == 2) {
-            *out_base = (uintptr_t)start;
+        if (sscanf(line, "%lx-%lx", &start, &end) != 2) continue;
+        if (!found || (uintptr_t)start < lowest) {
+            lowest = (uintptr_t)start;
             found = 1;
-            break;
         }
     }
     fclose(f);
+    if (found) *out_base = lowest;
     return found;
 }
 
