@@ -111,32 +111,24 @@ public final class BhVibrationController {
     // Controller keepalive state: per deviceId, last dispatched (low, high, when).
     private final Map<Integer, long[]> controllerKeepalive = new HashMap<>();
 
-    // SDL-phantom suppression. When stock g() fires within ~1 s of the last
-    // non-zero rumble, treat it as SDL's internal auto-expiry and skip stock
-    // g() — leaves the motor's VibrationEffect running and lets the keepalive
-    // runnable refresh it. suppressionStart[deviceId] = SystemClock.uptimeMillis()
-    // at the moment of suppression. Cleared on any non-zero arrival or by the
-    // timeout enforcer in keepaliveRunnable (see MAX_SUSTAINED_RUMBLE_MS).
-    private final Map<Integer, Long> suppressionStart = new HashMap<>();
-
-    // SDL phantom signature: every traced auto-expiry sits at gap=1000-1001 ms
-    // exactly; real game-driven stops cluster at <300 ms. ±50 ms window splits
-    // them cleanly.
-    private static final long SDL_PHANTOM_MIN_MS = 950L;
-    private static final long SDL_PHANTOM_MAX_MS = 1050L;
-
-    // Hard cap on suppression. After this, force-stop the motor regardless —
-    // bounds worst-case "false rumble after release" because Wine doesn't
-    // re-issue a (0,0) once SDL is in its stopped state. The user releases
-    // their input but the host can't see it (no event from Wine), so this
-    // cap is effectively the worst-case lag between a real release and
-    // motor stop. Tuning trade-off:
-    //   higher → sustained rumble lasts longer, but lingers longer after release
-    //   lower  → instant release, but sustained cuts shorter
-    // 1 s gives ~2 s sustained (1 s real + 1 s extension via the existing
-    // 2 s VibrationEffect that's still running) with at most ~1 s false
-    // rumble after release.
-    private static final long MAX_SUSTAINED_RUMBLE_MS = 1000L;
+    // PHANTOM SUPPRESSION REMOVED.
+    //
+    // Earlier builds of this controller suppressed any (0,0) arriving in a
+    // [950, 1050] ms window after the previous non-zero — the signature of
+    // SDL2's internal 1 s rumble auto-expiry. With the libevshim guest-side
+    // shim now patching winebus.so's pSDL_JoystickRumble pointer to our
+    // wrapper, the keepalive thread re-issues the active rumble every 500 ms
+    // with a 2 s duration, which resets SDL2's internal rumble_expiration on
+    // every call (SDL2 updates the timer even when low/high are unchanged).
+    // The phantom can no longer fire, so suppressing in this window only
+    // produced false positives on legitimate ~1 s game-driven holds (e.g.
+    // a 1.05 s press registered as gap=1050 ms → host suppresses for another
+    // 1 s = ~2 s of rumble for a 1 s press). PC-accurate behavior is to
+    // trust every (0,0) as a real game release and stop instantly.
+    //
+    // The DIAG line still tags the [900, 1200] ms window as
+    // "[SDL_AUTO_EXPIRY?]" for telemetry — useful if the keepalive ever
+    // breaks again — but no functional path branches on it.
 
     // Last device-effect time so we don't overwhelm phone vibrator.
     private volatile long lastDeviceDispatch = 0L;
@@ -147,34 +139,6 @@ public final class BhVibrationController {
         public void run() {
             try {
                 long now = SystemClock.uptimeMillis();
-
-                // SDL-phantom suppression timeout enforcer: any deviceId whose
-                // suppression has been active for longer than MAX_SUSTAINED_RUMBLE_MS
-                // gets force-stopped here. This is the bound that keeps a stuck
-                // controller from running forever when Wine never re-emits a (0,0)
-                // (because SDL is in its stopped state from its perspective).
-                if (!suppressionStart.isEmpty()) {
-                    java.util.List<Integer> timedOut = null;
-                    synchronized (suppressionStart) {
-                        for (Map.Entry<Integer, Long> e : suppressionStart.entrySet()) {
-                            if (now - e.getValue() > MAX_SUSTAINED_RUMBLE_MS) {
-                                if (timedOut == null) timedOut = new java.util.ArrayList<>(2);
-                                timedOut.add(e.getKey());
-                            }
-                        }
-                        if (timedOut != null) {
-                            for (Integer dev : timedOut) suppressionStart.remove(dev);
-                        }
-                    }
-                    if (timedOut != null) {
-                        for (Integer deviceId : timedOut) {
-                            Log.i(TAG, "suppression timeout dev=" + deviceId
-                                    + " (" + MAX_SUSTAINED_RUMBLE_MS + "ms) — force stop");
-                            stopController(deviceId);
-                            recordKeepalive(deviceId, 0, 0);
-                        }
-                    }
-                }
 
                 // Controller side: refresh any active controller whose last dispatch
                 // is older than KEEPALIVE threshold and whose amplitude is non-zero.
@@ -338,13 +302,11 @@ public final class BhVibrationController {
     // (dispatch). Our Patch 2 hooks h(II)V only, so without Patch 7 the (0,0)
     // would bypass our handler and our keepalive map would never clear.
     //
-    // Patch 7 hooks g()V to call onStop(deviceId).
-    //   Return true  → suppress (SDL auto-expiry phantom). Skip stock g();
-    //                  the motor's existing VibrationEffect keeps running and
-    //                  the keepalive runnable refreshes it every 1.5 s, up to
-    //                  MAX_SUSTAINED_RUMBLE_MS at which point it force-stops.
-    //   Return false → real game-driven stop. Let stock g() iterate the
-    //                  vibrator list and cancel each.
+    // Patch 7 hooks g()V to call onStop(deviceId). With libevshim's keepalive
+    // working, SDL2's 1 s auto-expiry can never fire, so onStop always takes
+    // the real-stop path and returns false to let stock g() iterate the
+    // vibrator list and cancel each (we've already issued our supersede
+    // pattern ahead of it).
     // ─────────────────────────────────────────────────────────────────────────
     public static boolean onStop(int deviceId) {
         try {
@@ -415,12 +377,6 @@ public final class BhVibrationController {
 
         dispatchControllerInternal(dev, low, high, /*log*/ true);
         recordKeepalive(deviceId, low, high);
-        // Game is actively rumbling — any prior suppression timeout is no
-        // longer relevant. Clear it so the timeout enforcer doesn't fire while
-        // real rumble is in progress.
-        synchronized (suppressionStart) {
-            suppressionStart.remove(deviceId);
-        }
         return true;
     }
 
@@ -429,51 +385,17 @@ public final class BhVibrationController {
      * whenever stock GameHub's GamepadDevice.f(II)V routes a (0, 0) rumble
      * to the stop path.
      *
-     * Returns true to SUPPRESS — stock g() is skipped, the motor's existing
-     * VibrationEffect keeps running, and the keepalive runnable refreshes it
-     * every 1.5 s up to MAX_SUSTAINED_RUMBLE_MS at which point the timeout
-     * enforcer in keepaliveRunnable force-stops it.
-     *
-     * Returns false on a real game-driven stop — stock g() runs after us and
-     * iterates the vibrator list canceling each. We also issue our supersede
-     * pattern (1 ms minimum-amplitude vm.vibrate()) ahead of stock g() because
-     * on Samsung's Vibrator HAL for InputDevice vibrators, Vibrator.cancel()
-     * doesn't reliably halt BT-HID effects already uploaded to the controller.
-     *
-     * SDL phantom signature: every traced auto-expiry sits at gap=1000–1001 ms
-     * exactly; real game stops cluster at <300 ms. The [950, 1050] ms window
-     * splits them cleanly.
+     * With libevshim's GOT patch on winebus.so + 500 ms keepalive, SDL2's
+     * 1 s rumble auto-expiry can no longer fire — every (0, 0) reaching us
+     * is a real game-driven release. We always take the real-stop path and
+     * return false so stock g() runs after us and iterates the vibrator
+     * list canceling each. We also issue our supersede pattern (1 ms
+     * minimum-amplitude vm.vibrate()) ahead of stock g() because on
+     * Samsung's Vibrator HAL for InputDevice vibrators, Vibrator.cancel()
+     * doesn't reliably halt BT-HID effects already uploaded to the
+     * controller.
      */
     private boolean handleStop(int deviceId) {
-        long now = SystemClock.uptimeMillis();
-        long lastNonZeroWhen = 0L;
-        boolean lastWasNonZero = false;
-        synchronized (controllerKeepalive) {
-            long[] st = controllerKeepalive.get(deviceId);
-            if (st != null) {
-                lastWasNonZero = (st[0] != 0 || st[1] != 0);
-                lastNonZeroWhen = st[2];
-            }
-        }
-
-        if (lastWasNonZero && lastNonZeroWhen > 0) {
-            long gap = now - lastNonZeroWhen;
-            if (gap >= SDL_PHANTOM_MIN_MS && gap <= SDL_PHANTOM_MAX_MS) {
-                // SDL auto-expiry phantom. Suppress: don't clear keepalive map,
-                // don't cancel motor. The motor's VibrationEffect continues and
-                // the keepalive runnable will refresh it every 1.5 s up to the
-                // MAX_SUSTAINED_RUMBLE_MS timeout.
-                synchronized (suppressionStart) {
-                    suppressionStart.put(deviceId, now);
-                }
-                Log.i(TAG, "STOP-G suppress dev=" + deviceId + " gap=" + gap
-                        + "ms (SDL phantom; keepalive will run for up to "
-                        + MAX_SUSTAINED_RUMBLE_MS + "ms then force-stop)");
-                return true;
-            }
-        }
-
-        // Real game-driven stop.
         Log.i(TAG, "STOP-G dev=" + deviceId);
         recordKeepalive(deviceId, 0, 0);
         for (int i = 0; i < MAX_SLOTS; i++) {
@@ -481,9 +403,6 @@ public final class BhVibrationController {
             slotHigh[i] = 0;
         }
         deviceActive = false;
-        synchronized (suppressionStart) {
-            suppressionStart.remove(deviceId);
-        }
         // Supersede AHEAD of stock g()'s per-vibrator cancel.
         stopController(deviceId);
         return false;
