@@ -19,7 +19,10 @@ import android.os.FileObserver;
 
 import java.io.File;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -95,10 +98,10 @@ public final class BhVibrationController {
     private static final int DEFAULT_INTENSITY = 100;
 
     // Compile-time flag: when false, R8 strips logGuestTransition's body
-    // and the diagPrev* arrays drop to dead state. Keep true while the
-    // GOT-patcher / SDL keepalive interaction is still being validated;
-    // flip to false for stable release builds. See logGuestTransition.
-    private static final boolean DIAG = true;
+    // and the diagPrev* arrays drop to dead state. Multi-controller +
+    // 3+ slot wake-up validated, so default to false for ship builds —
+    // flip back to true if reproducing a regression locally.
+    private static final boolean DIAG = false;
 
     /** Per-dispatch / per-state-change diagnostic log. Compiled out when
      *  DIAG is false (R8 inlines and dead-codes the body). Use this for
@@ -629,8 +632,8 @@ public final class BhVibrationController {
         // *did* land in shared memory, libvfs just hadn't started watching
         // it yet. Firing in ascending order, ~200 ms apart, gives each
         // slot time to register before the next stimulus arrives.
-        java.util.List<Integer> slots = new java.util.ArrayList<>(pendingWakeups.keySet());
-        java.util.Collections.sort(slots);
+        List<Integer> slots = new ArrayList<>(pendingWakeups.keySet());
+        Collections.sort(slots);
         long delayMs = 0L;
         for (final int slot : slots) {
             final Object serverManager = pendingWakeups.get(slot);
