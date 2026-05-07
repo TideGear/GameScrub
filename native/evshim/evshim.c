@@ -308,9 +308,28 @@ static void read_self_cmdline(char *out, size_t out_size)
     }
 }
 
-/* Walk the in-memory ELF at `base`, find the SDL_JoystickRumble GOT slot,
- * and patch it to point at our wrapper. Pure pointer arithmetic + mprotect;
- * no linker calls. Returns 1 on success. */
+/* Patch winebus.so so its calls to SDL_JoystickRumble go through our wrapper.
+ *
+ * winebus.so doesn't link against libSDL2-2.0.so directly (no NEEDED entry,
+ * no relocation for SDL_JoystickRumble in either DT_JMPREL or DT_RELA — the
+ * previous iteration logged "not in JMPREL (n=34)" and "not in RELA (n=60)").
+ * Instead it calls dlopen("libSDL2-2.0.so") in sdl_bus_init, then dlsym's
+ * each function name into a static `pSDL_*` table in .bss. The actual call
+ * sites do `(*pSDL_JoystickRumble)(...)`. So there's no GOT entry to patch
+ * via relocations — we have to patch the function-pointer table after
+ * winebus has populated it.
+ *
+ * Strategy:
+ *   1. Walk PT_LOAD program headers in memory; find writable segments.
+ *   2. Scan each writable segment 8-byte-aligned for any qword matching
+ *      real_SDL_JoystickRumble (libSDL2's exported symbol address — what
+ *      winebus's dlsym call returned for the same name).
+ *   3. mprotect, overwrite each match with our wrapper, mprotect back.
+ *
+ * Why scanning is safe: real_SDL_JoystickRumble is a 64-bit address. False
+ * positives in random data are ~1/2^64 — effectively impossible. We also
+ * confine the scan to winebus.so's own writable segments, so we never
+ * touch other libraries' data. */
 static int patch_winebus_at_base(uintptr_t base)
 {
     const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *)base;
@@ -319,114 +338,61 @@ static int patch_winebus_at_base(uintptr_t base)
         LOGE("winebus base=%p not ELF", (void *)base);
         return 0;
     }
+    if (!real_SDL_JoystickRumble) {
+        LOG("winebus: real_SDL_JoystickRumble unresolved — skipping scan");
+        return 0;
+    }
 
     const ElfW(Phdr) *ph = (const ElfW(Phdr) *)(base + eh->e_phoff);
-    const ElfW(Phdr) *dynp = NULL;
-    for (int i = 0; i < eh->e_phnum; i++) {
-        if (ph[i].p_type == PT_DYNAMIC) {
-            dynp = &ph[i];
-            break;
-        }
-    }
-    if (!dynp) {
-        LOG("winebus: no PT_DYNAMIC");
-        return 0;
-    }
-
-    ElfW(Dyn) *dyn = (ElfW(Dyn) *)(base + dynp->p_vaddr);
-
-    /* Bionic's linker does NOT rewrite the in-memory dynamic table — it
-     * reads d_un.d_ptr as a load-bias-relative offset and adds load_bias
-     * at the consumer site (see soinfo::prelink_image in AOSP linker.cpp).
-     * So we must add `base` ourselves. The earlier version of this code
-     * treated d_ptr as already-absolute, which dereferenced tiny offsets
-     * like 0x1000 as pointers and SIGSEGV'd winedevice.exe — taking out
-     * the HID stack and breaking all controller input. */
-    const ElfW(Sym) *symtab = NULL;
-    const char      *strtab = NULL;
-    const uint8_t   *jmprel = NULL;
-    size_t           jmprelsz = 0;
-    int              pltrel_type = DT_RELA;
-    /* DT_RELA holds the regular dynamic relocation table — needed for
-     * non-PLT GOT references (R_AARCH64_GLOB_DAT). When the compiler
-     * emits a function call as an indirect GOT load instead of a PLT
-     * jump (e.g. -fno-plt, or weak refs, or some Wine PE-bridge code),
-     * the relocation is in DT_RELA, not DT_JMPREL. The previous
-     * iteration only walked DT_JMPREL and missed it — winebus.so
-     * logged "n=34" PLT relocs but no SDL_JoystickRumble entry. */
-    const uint8_t   *rela = NULL;
-    size_t           relasz = 0;
-    size_t           relaent = sizeof(ElfW(Rela));
-
-    for (ElfW(Dyn) *d = dyn; d->d_tag != DT_NULL; d++) {
-        switch (d->d_tag) {
-            case DT_SYMTAB:   symtab = (const ElfW(Sym) *)(base + d->d_un.d_ptr); break;
-            case DT_STRTAB:   strtab = (const char *)(base + d->d_un.d_ptr); break;
-            case DT_JMPREL:   jmprel = (const uint8_t *)(base + d->d_un.d_ptr); break;
-            case DT_PLTRELSZ: jmprelsz = d->d_un.d_val; break;
-            case DT_PLTREL:   pltrel_type = (int)d->d_un.d_val; break;
-            case DT_RELA:     rela = (const uint8_t *)(base + d->d_un.d_ptr); break;
-            case DT_RELASZ:   relasz = d->d_un.d_val; break;
-            case DT_RELAENT:  relaent = d->d_un.d_val; break;
-            default: break;
-        }
-    }
-    if (!symtab || !strtab) {
-        LOG("winebus: dyn missing symtab/strtab");
-        return 0;
-    }
-
     long page_size = sysconf(_SC_PAGESIZE);
+    uintptr_t target = (uintptr_t)real_SDL_JoystickRumble;
+    uintptr_t replacement = (uintptr_t)&SDL_JoystickRumble;
+    int total_segments = 0;
+    size_t total_bytes = 0;
     int patched = 0;
 
-    /* Walk DT_JMPREL (PLT relocations) and DT_RELA (regular dynamic
-     * relocations). PLT covers normal function calls; regular RELA
-     * covers non-PLT GOT references like R_AARCH64_GLOB_DAT, which
-     * winebus.so apparently uses for SDL_JoystickRumble (the previous
-     * JMPREL-only walk found 34 entries but no SDL_JoystickRumble).
-     * Two passes: same matching logic, different table pointers. */
-    const uint8_t *tables[2]   = { jmprel, rela };
-    size_t         tablesz[2]  = { jmprelsz, relasz };
-    size_t         entsize[2]  = { sizeof(ElfW(Rela)), relaent };
-    const char    *which[2]    = { "JMPREL", "RELA" };
-    int            do_table[2] = { (pltrel_type == DT_RELA) ? 1 : 0, 1 };
+    for (int i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type != PT_LOAD) continue;
+        if (!(ph[i].p_flags & PF_W)) continue;
 
-    if (pltrel_type != DT_RELA) {
-        LOG("winebus: PLT type=%d not RELA — skipping JMPREL scan", pltrel_type);
-    }
+        uintptr_t seg_start = base + ph[i].p_vaddr;
+        size_t    seg_size  = ph[i].p_memsz;
+        if (seg_size < sizeof(uintptr_t)) continue;
+        total_segments++;
+        total_bytes += seg_size;
 
-    for (int t = 0; t < 2; t++) {
-        if (!do_table[t] || !tables[t] || tablesz[t] == 0) continue;
-        size_t n = tablesz[t] / entsize[t];
-        int found_in_table = 0;
-        for (size_t i = 0; i < n; i++) {
-            const ElfW(Rela) *r = (const ElfW(Rela) *)(tables[t] + i * entsize[t]);
-            size_t sym_idx = ELF64_R_SYM(r->r_info);
-            if (sym_idx == 0) continue;
-            const char *sym_name = strtab + symtab[sym_idx].st_name;
-            if (strcmp(sym_name, "SDL_JoystickRumble") != 0) continue;
+        /* Scan 8-byte aligned. seg_start is page-aligned by ELF rules so
+         * already qword-aligned, but be defensive. */
+        uintptr_t scan_start = (seg_start + 7) & ~(uintptr_t)7;
+        uintptr_t scan_end   = seg_start + seg_size - sizeof(uintptr_t);
 
-            void **slot = (void **)(base + r->r_offset);
-            void  *old  = *slot;
-            uintptr_t page_addr = (uintptr_t)slot & ~((uintptr_t)page_size - 1);
+        for (uintptr_t p = scan_start; p <= scan_end; p += sizeof(uintptr_t)) {
+            uintptr_t *slot = (uintptr_t *)p;
+            if (*slot != target) continue;
+
+            uintptr_t page_addr = p & ~((uintptr_t)page_size - 1);
             if (mprotect((void *)page_addr, (size_t)page_size,
                          PROT_READ | PROT_WRITE) != 0) {
-                LOGE("got_patch winebus: mprotect failed: %s", strerror(errno));
+                LOGE("winebus scan: mprotect rw failed at %p: %s",
+                     (void *)page_addr, strerror(errno));
                 continue;
             }
-            *slot = (void *)&SDL_JoystickRumble;
-            mprotect((void *)page_addr, (size_t)page_size, PROT_READ);
+            uintptr_t old = *slot;
+            *slot = replacement;
+            mprotect((void *)page_addr, (size_t)page_size, PROT_READ | PROT_WRITE);
+            /* Leave .data/.bss writable — winebus may legitimately rewrite
+             * its own pSDL table during shutdown. Reverting to PROT_READ
+             * would crash it. */
 
-            LOG("got_patch winebus.so (%s): SDL_JoystickRumble slot=%p old=%p new=%p",
-                which[t], (void *)slot, old, (void *)&SDL_JoystickRumble);
-            patched = 1;
-            found_in_table = 1;
-        }
-        if (!found_in_table) {
-            LOG("winebus: SDL_JoystickRumble not in %s (n=%zu)", which[t], n);
+            LOG("got_patch winebus.so: pSDL_JoystickRumble slot=%p old=0x%lx new=0x%lx",
+                (void *)slot, (unsigned long)old, (unsigned long)replacement);
+            patched++;
         }
     }
-    return patched;
+
+    LOG("winebus scan: %d writable segments, %zu bytes, %d slots patched",
+        total_segments, total_bytes, patched);
+    return patched > 0;
 }
 
 /* One-shot patcher thread. Runs exactly once, 5 seconds after spawn,
