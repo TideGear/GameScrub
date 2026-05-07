@@ -42,6 +42,9 @@ public class BhVibrationSettingsActivity extends Activity {
     public static final String EXTRA_GAME_ID   = "bh_vibration.gameId";
     public static final String EXTRA_GAME_NAME = "bh_vibration.gameName";
 
+    // Cached once in onCreate so dp() doesn't repeatedly hit Resources.
+    private float density = 1f;
+
     /** Launch entry point used by the BhVibrationLambda smali stub from
      *  GameDetailSettingMenu's per-game options menu. */
     public static void launch(Context ctx, String gameId, String gameName) {
@@ -55,6 +58,7 @@ public class BhVibrationSettingsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        density = getResources().getDisplayMetrics().density;
         getWindow().setBackgroundDrawable(new ColorDrawable(0xCC000000));
 
         String gameId   = getIntent() != null ? getIntent().getStringExtra(EXTRA_GAME_ID)   : null;
@@ -258,6 +262,6 @@ public class BhVibrationSettingsActivity extends Activity {
     }
 
     private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density + 0.5f);
+        return (int) (v * density + 0.5f);
     }
 }

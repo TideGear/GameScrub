@@ -100,6 +100,15 @@ public final class BhVibrationController {
     // flip to false for stable release builds. See logGuestTransition.
     private static final boolean DIAG = true;
 
+    /** Per-dispatch / per-state-change diagnostic log. Compiled out when
+     *  DIAG is false (R8 inlines and dead-codes the body). Use this for
+     *  logs that fire at gameplay rate — keep Log.i for one-shot lifecycle
+     *  events (controller connect, settings change, etc.) so support still
+     *  has visibility on those even in stripped release builds. */
+    private static void dlog(String msg) {
+        if (DIAG) Log.i(TAG, msg);
+    }
+
     // XInput slots count (matches GamepadServerManager's slot range 0..3)
     private static final int MAX_SLOTS = 4;
 
@@ -448,7 +457,7 @@ public final class BhVibrationController {
         int mode = cachedMode;
         int low = lowRaw & 0xFFFF;
         int high = highRaw & 0xFFFF;
-        Log.i(TAG, "DISPATCH dev=" + deviceId + " mode=" + mode
+        dlog("DISPATCH dev=" + deviceId + " mode=" + mode
                 + " low=" + low + " high=" + high);
 
         if (mode == MODE_OFF || mode == MODE_DEVICE) {
@@ -459,7 +468,7 @@ public final class BhVibrationController {
 
         InputDevice dev = InputDevice.getDevice(deviceId);
         if (dev == null) {
-            Log.i(TAG, "DISPATCH dev=" + deviceId + " InputDevice.getDevice -> null, fallthrough");
+            dlog("DISPATCH dev=" + deviceId + " InputDevice.getDevice -> null, fallthrough");
             return false; // let stock code try (won't find anything, but no harm)
         }
 
@@ -485,7 +494,7 @@ public final class BhVibrationController {
      * each.
      */
     private void handleStop(int deviceId) {
-        Log.i(TAG, "STOP-G dev=" + deviceId);
+        dlog("STOP-G dev=" + deviceId);
         recordKeepalive(deviceId, 0, 0);
         // Don't touch slotLow[]/slotHigh[]/deviceActive here — those are
         // indexed by *guest XInput slot*, not Android deviceId, so we have
@@ -777,7 +786,7 @@ public final class BhVibrationController {
             vm.vibrate(combined);
         }
 
-        if (logMotors) {
+        if (logMotors && DIAG) {
             Log.i(TAG, "combined dispatch ids=" + java.util.Arrays.toString(sortedIds)
                     + " lowAmp=" + effLow + " highAmp=" + effHigh);
         }
@@ -796,7 +805,7 @@ public final class BhVibrationController {
     private void stopController(int deviceId) {
         InputDevice dev = InputDevice.getDevice(deviceId);
         if (dev == null) {
-            Log.i(TAG, "STOP dev=" + deviceId + " InputDevice null");
+            dlog("STOP dev=" + deviceId + " InputDevice null");
             return;
         }
         try {
@@ -823,22 +832,24 @@ public final class BhVibrationController {
                             vm.vibrate(p.combine());
                         }
                         vm.cancel();
-                        Log.i(TAG, "STOP dev=" + deviceId + " supersede+cancel ids="
-                                + java.util.Arrays.toString(ids));
+                        if (DIAG) {
+                            Log.i(TAG, "STOP dev=" + deviceId + " supersede+cancel ids="
+                                    + java.util.Arrays.toString(ids));
+                        }
                         return;
                     }
-                    Log.i(TAG, "STOP dev=" + deviceId + " vm has no vibrator ids; cancel()");
+                    dlog("STOP dev=" + deviceId + " vm has no vibrator ids; cancel()");
                     vm.cancel();
                     return;
                 }
             }
             Vibrator v = dev.getVibrator();
             if (v != null) {
-                Log.i(TAG, "STOP dev=" + deviceId + " single-vibrator supersede+cancel");
+                dlog("STOP dev=" + deviceId + " single-vibrator supersede+cancel");
                 try { v.vibrate(VibrationEffect.createOneShot(1L, 1)); } catch (Throwable ignored) {}
                 v.cancel();
             } else {
-                Log.i(TAG, "STOP dev=" + deviceId + " no Vibrator/VibratorManager");
+                dlog("STOP dev=" + deviceId + " no Vibrator/VibratorManager");
             }
         } catch (Throwable t) {
             Log.w(TAG, "STOP dev=" + deviceId + " threw", t);
