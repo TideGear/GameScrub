@@ -33,6 +33,13 @@ import java.util.concurrent.atomic.AtomicLongArray;
  *     the head of GamepadDevice$Physical.h(II)V. Returns true to short-circuit
  *     the stock dispatch (which lacks amplitude-control checks, VibrationAttributes,
  *     and CombinedVibration.startParallel).
+ *   - scheduleWakeup(serverManager, slot): post-connect wake-up, invoked at the
+ *     head of GamepadManager.B0(GamepadConnectionEvent)V. Writes a synthetic
+ *     near-zero left-stick X to the slot's GamepadState so libvfs's poller
+ *     sees a state change and triggers SDL_JOYDEVICEADDED, which lets winebus
+ *     open the joystick BEFORE the user has pressed anything (otherwise rumble
+ *     silently no-ops on freshly-connected controllers in multi-controller
+ *     setups until each is "activated" by an input event).
  *
  * Modes:
  *   0 = Off         — no rumble anywhere
@@ -347,6 +354,34 @@ public final class BhVibrationController {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // Smali entry 4: GamepadManager.B0(GamepadConnectionEvent)V — connect hook.
+    //
+    // When a controller connects, libvfs.so creates a virtual SDL joystick for
+    // the slot but does NOT emit SDL_JOYDEVICEADDED until first input arrives.
+    // winebus.so therefore never calls SDL_JoystickOpen on the slot, and the
+    // game's XInputSetState dispatch ends up writing rumble to a slot winebus
+    // hasn't registered — silent no-op. Multi-controller users see the second
+    // (and Nth) controller's rumble fail until they press any button on it.
+    //
+    // This hook fires once per connect with the GamepadServerManager + slot
+    // available. We schedule a 200 ms delayed task that writes a synthetic
+    // near-zero left-stick X (value=1, well below any deadzone) to the slot's
+    // GamepadState ByteBuffer, then resets to 0 50 ms later. libvfs's poller
+    // sees the state change → emits SDL_JOYDEVICEADDED → winebus opens the
+    // joystick → rumble dispatch works without user input.
+    //
+    // Reflection-based to avoid compile-time dependency on Tencent's
+    // gamepad classes.
+    // ─────────────────────────────────────────────────────────────────────────
+    public static void scheduleWakeup(Object serverManager, int slot) {
+        try {
+            getInstance().handleScheduleWakeup(serverManager, slot);
+        } catch (Throwable t) {
+            Log.w(TAG, "scheduleWakeup failed", t);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Core logic
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -432,6 +467,58 @@ public final class BhVibrationController {
         // when ANY controller stops in a multi-controller session.
         // Supersede AHEAD of stock g()'s per-vibrator cancel.
         stopController(deviceId);
+    }
+
+    /**
+     * Wake up libvfs's lazily-registered virtual joystick for the newly-
+     * connected slot by writing a synthetic near-zero left-stick X axis
+     * value, then resetting to neutral. The state change makes libvfs
+     * emit SDL_JOYDEVICEADDED so winebus.so can open the joystick before
+     * the user provides any input.
+     *
+     * Done via reflection because the relevant Tencent gamepad classes
+     * (GamepadServerManager, GamepadState) aren't on our compile classpath.
+     * Method names: GamepadServerManager.g(int) → GamepadState; and
+     * GamepadState.e(short) writes left-stick X via ByteBuffer.putShort(0, v).
+     */
+    private void handleScheduleWakeup(final Object serverManager, final int slot) {
+        if (serverManager == null || slot < 0 || slot >= MAX_SLOTS) {
+            return;
+        }
+        Log.i(TAG, "wake-up scheduled slot=" + slot);
+        worker.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    Method getState = serverManager.getClass()
+                            .getDeclaredMethod("g", int.class);
+                    getState.setAccessible(true);
+                    final Object state = getState.invoke(serverManager, slot);
+                    if (state == null) {
+                        Log.i(TAG, "wake-up: no GamepadState for slot " + slot);
+                        return;
+                    }
+                    final Method writeAxisX = state.getClass()
+                            .getDeclaredMethod("e", short.class);
+                    writeAxisX.setAccessible(true);
+                    // Value 1 is well below any reasonable deadzone — invisible
+                    // to the game, but enough of a state change for libvfs's
+                    // poller to register and notify SDL.
+                    writeAxisX.invoke(state, (short) 1);
+                    worker.postDelayed(new Runnable() {
+                        @Override public void run() {
+                            try {
+                                writeAxisX.invoke(state, (short) 0);
+                                Log.i(TAG, "wake-up complete slot=" + slot);
+                            } catch (Throwable t) {
+                                Log.w(TAG, "wake-up reset failed slot=" + slot, t);
+                            }
+                        }
+                    }, 50L);
+                } catch (Throwable t) {
+                    Log.w(TAG, "wake-up dispatch failed slot=" + slot, t);
+                }
+            }
+        }, 200L);
     }
 
     /**

@@ -566,6 +566,46 @@ jobs:
               'GamepadDevice$Physical.g(): inject BhVibrationController.onStop pre-cancel supersede'
           )
 
+          # Patch 8: GamepadManager.B0(GamepadConnectionEvent)V — connect hook.
+          # On controller-connect, libvfs lazily registers the virtual SDL joystick
+          # and only emits SDL_JOYDEVICEADDED on first input. Until that fires,
+          # winebus.so doesn't open the slot's joystick and rumble dispatches
+          # silently no-op. Multi-controller users see the second/Nth controller's
+          # rumble fail until they press any button on it.
+          #
+          # We extract slot via GamepadSlotManager.m(GamepadDevice)I (field e on
+          # GamepadManager) and pass the GamepadServerManager (field c) plus slot
+          # to BhVibrationController.scheduleWakeup, which writes a synthetic
+          # near-zero left-stick value 200ms later to trigger libvfs's onInput.
+          #
+          # Inject BEFORE stock body so registers v0..v3 (declared by .locals 4)
+          # are reused after our injection — stock's first instruction
+          # const-string v0, "event" overwrites v0 cleanly.
+          patch(
+              'apktool_out_base/smali_classes7/com/winemu/core/gamepad/GamepadManager.smali',
+              '.method public B0(Lcom/winemu/core/gamepad/GamepadConnectionEvent;)V\n'
+              '    .locals 4\n'
+              '\n'
+              '    .line 1\n'
+              '    const-string v0, "event"\n',
+              '.method public B0(Lcom/winemu/core/gamepad/GamepadConnectionEvent;)V\n'
+              '    .locals 4\n'
+              '\n'
+              '    # BH: schedule synthetic wake-up so libvfs registers this slot\n'
+              '    # with SDL before the user presses anything.\n'
+              '    invoke-virtual {p1}, Lcom/winemu/core/gamepad/GamepadConnectionEvent;->a()Lcom/winemu/core/gamepad/GamepadDevice;\n'
+              '    move-result-object v0\n'
+              '    iget-object v1, p0, Lcom/winemu/core/gamepad/GamepadManager;->e:Lcom/winemu/core/gamepad/GamepadSlotManager;\n'
+              '    invoke-virtual {v1, v0}, Lcom/winemu/core/gamepad/GamepadSlotManager;->m(Lcom/winemu/core/gamepad/GamepadDevice;)I\n'
+              '    move-result v1\n'
+              '    iget-object v2, p0, Lcom/winemu/core/gamepad/GamepadManager;->c:Lcom/winemu/core/gamepad/GamepadServerManager;\n'
+              '    invoke-static {v2, v1}, Lcom/xj/winemu/vibration/BhVibrationController;->scheduleWakeup(Ljava/lang/Object;I)V\n'
+              '\n'
+              '    .line 1\n'
+              '    const-string v0, "event"\n',
+              'GamepadManager.B0(): inject BhVibrationController.scheduleWakeup post-connect'
+          )
+
           print("\nBhVibration smali patches applied successfully.")
           PYEOF
 
