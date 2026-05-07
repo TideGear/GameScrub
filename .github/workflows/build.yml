@@ -290,11 +290,25 @@ jobs:
               '    invoke-direct/range {v9 .. v17}, Lcom/xj/common/view/popup/Option;-><init>(Ljava/lang/String;ZIIILkotlin/jvm/functions/Function1;ILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
               '    invoke-interface {v1, v9}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
               '\n'
+              '    # BH: PC Vibration Settings option\n'
+              '    new-instance v9, Lcom/xj/common/view/popup/Option;\n'
+              '    const-string v10, "PC Vibration Settings"\n'
+              '    const/4 v11, 0x0\n'
+              '    const/4 v12, 0x0\n'
+              '    const/4 v13, 0x0\n'
+              '    const/4 v14, 0x0\n'
+              '    new-instance v15, Lcom/xj/landscape/launcher/ui/gamedetail/BhVibrationLambda;\n'
+              '    invoke-direct {v15, v4, v3}, Lcom/xj/landscape/launcher/ui/gamedetail/BhVibrationLambda;-><init>(Lcom/xj/landscape/launcher/ui/gamedetail/GameDetailSettingMenu;Lcom/xj/common/service/bean/GameDetailEntity;)V\n'
+              '    const/16 v16, 0x1e\n'
+              '    const/16 v17, 0x0\n'
+              '    invoke-direct/range {v9 .. v17}, Lcom/xj/common/view/popup/Option;-><init>(Ljava/lang/String;ZIIILkotlin/jvm/functions/Function1;ILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
+              '    invoke-interface {v1, v9}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
+              '\n'
               '    return-object v1\n'
               '.end method\n',
-              'GameDetailSettingMenu.W(): inject Export Config + Import Config + Frontend Export options'
+              'GameDetailSettingMenu.W(): inject Export Config + Import Config + Frontend Export + PC Vibration Settings options'
           )
-          print("Settings Import/Export patch applied.")
+          print("Settings Import/Export + Vibration patches applied.")
           PYEOF
 
       - name: Build libevshim.so (guest-side SDL keepalive)
@@ -406,102 +420,14 @@ jobs:
               'GamepadDevice$Physical.h(II)V: inject BhVibrationController.dispatchToController'
           )
 
-          # Patch 3: SettingBtnHolder.w() — handle click for contentType=0x65 (PC Vibration Settings)
-          # Applied AFTER the Grant Root Access patch that inserted :bh_skip_root_grant.
-          # We insert right after :bh_skip_root_grant so both branches coexist.
-          patch(
-              'apktool_out_base/smali_classes6/com/xj/landscape/launcher/ui/setting/holder/SettingBtnHolder.smali',
-              '    :bh_skip_root_grant\n'
-              '\n'
-              '    .line 15\n'
-              '    sget-object p1, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
-              '->Companion:Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity$Companion;\n',
-              '    :bh_skip_root_grant\n'
-              '\n'
-              '    # BH: PC Vibration Settings click handler (contentType=0x65)\n'
-              '    const/16 v0, 0x65\n'
-              '\n'
-              '    if-ne p0, v0, :bh_skip_vib_settings\n'
-              '\n'
-              '    invoke-virtual {p2}, Landroid/view/View;->getContext()Landroid/content/Context;\n'
-              '\n'
-              '    move-result-object v0\n'
-              '\n'
-              '    invoke-static {v0}, Lcom/xj/winemu/vibration/BhVibrationController;->launchSettings(Landroid/content/Context;)V\n'
-              '\n'
-              '    sget-object v0, Lkotlin/Unit;->a:Lkotlin/Unit;\n'
-              '\n'
-              '    return-object v0\n'
-              '\n'
-              '    :bh_skip_vib_settings\n'
-              '\n'
-              '    .line 15\n'
-              '    sget-object p1, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
-              '->Companion:Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity$Companion;\n',
-              'SettingBtnHolder.w(): PC Vibration Settings click handler (contentType=0x65)'
-          )
+          # NOTE: PC Vibration Settings is exposed in the per-game settings menu
+          # (GameDetailSettingMenu.W() patch above) — NOT in BannerHub's global
+          # Advanced settings sidebar. This way the settings file backing them
+          # is pc_g_setting<gameId>, which BhSettingsExporter already exports
+          # and imports as part of the per-game config bundle. No new sidebar
+          # contentType needed; the launch path goes through BhVibrationLambda.
 
-          # Patch 4: SettingItemEntity.getContentName() — return localized label for 0x65.
-          # Inserted before the :bh_skip_grant_name fallthrough so 0x65 resolves before the default lookup.
-          patch(
-              'apktool_out_base/smali_classes13/com/xj/landscape/launcher/data/model/entity/SettingItemEntity.smali',
-              '    :bh_skip_grant_name\n'
-              '    invoke-static {p0}, Lapp/revanced/extension/gamehub/prefs/GameHubPrefs;->getCustomSettingName(I)Ljava/lang/String;\n',
-              '    :bh_skip_grant_name\n'
-              '    # BH: PC Vibration Settings (contentType=0x65)\n'
-              '    const/16 v0, 0x65\n'
-              '\n'
-              '    if-ne p0, v0, :bh_skip_vib_name\n'
-              '\n'
-              '    const-string p0, "PC Vibration Settings"\n'
-              '\n'
-              '    return-object p0\n'
-              '\n'
-              '    :bh_skip_vib_name\n'
-              '    invoke-static {p0}, Lapp/revanced/extension/gamehub/prefs/GameHubPrefs;->getCustomSettingName(I)Ljava/lang/String;\n',
-              'SettingItemEntity.getContentName(): return "PC Vibration Settings" for 0x65'
-          )
-
-          # Patch 5: SettingItemViewModel.k() — add PC Vibration Settings TYPE_BTN below Grant Root Access
-          # Applied AFTER Grant Root added its 0x64 block; we append a 0x65 block right after.
-          patch(
-              'apktool_out_base/smali_classes3/com/xj/landscape/launcher/vm/SettingItemViewModel.smali',
-              '    # BannerHub: Grant Root Access button (contentType=0x64) below Clear Cache\n'
-              '    new-instance v0, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;\n'
-              '\n'
-              '    const/16 v2, 0x64\n'
-              '\n'
-              '    invoke-direct/range {v0 .. v6}, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
-              '-><init>(IILandroid/util/SparseArray;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
-              '\n'
-              '    invoke-interface {p0, v0}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
-              '\n'
-              '    .line 79\n',
-              '    # BannerHub: Grant Root Access button (contentType=0x64) below Clear Cache\n'
-              '    new-instance v0, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;\n'
-              '\n'
-              '    const/16 v2, 0x64\n'
-              '\n'
-              '    invoke-direct/range {v0 .. v6}, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
-              '-><init>(IILandroid/util/SparseArray;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
-              '\n'
-              '    invoke-interface {p0, v0}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
-              '\n'
-              '    # BH: PC Vibration Settings button (contentType=0x65)\n'
-              '    new-instance v0, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;\n'
-              '\n'
-              '    const/16 v2, 0x65\n'
-              '\n'
-              '    invoke-direct/range {v0 .. v6}, Lcom/xj/landscape/launcher/data/model/entity/SettingItemEntity;'
-              '-><init>(IILandroid/util/SparseArray;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V\n'
-              '\n'
-              '    invoke-interface {p0, v0}, Ljava/util/List;->add(Ljava/lang/Object;)Z\n'
-              '\n'
-              '    .line 79\n',
-              'SettingItemViewModel.k(): add PC Vibration Settings TYPE_BTN after Grant Root Access'
-          )
-
-          # Patch 6: EnvironmentController.b(Wine, String) — prepend libevshim.so to LD_PRELOAD.
+          # Patch 3: EnvironmentController.b(Wine, String) — prepend libevshim.so to LD_PRELOAD.
           # The shim is preloaded into Wine processes so it can interpose SDL_JoystickRumble
           # in libSDL2-2.0.so, keeping SDL's internal ~1 s rumble timer perpetually reset.
           # Without this, sustained rumble cuts out at exactly 1000 ms (SDL auto-expiry sends
@@ -541,7 +467,7 @@ jobs:
               'EnvironmentController.b(Wine, String): prepend libevshim.so to LD_PRELOAD'
           )
 
-          # Patch 7: GamepadDevice$Physical.g()V — stop hook.
+          # Patch 4: GamepadDevice$Physical.g()V — stop hook.
           # Stock GamepadDevice.f(II)V routes (0,0) -> g() and non-zero -> h(II)V.
           # Our Patch 2 only hooks h(II)V, so (0,0) would bypass our handler.
           # onStop is void: it issues our pre-cancel supersede pattern
@@ -566,7 +492,7 @@ jobs:
               'GamepadDevice$Physical.g(): inject BhVibrationController.onStop pre-cancel supersede'
           )
 
-          # Patch 8: GamepadManager.B0(GamepadConnectionEvent)V — connect hook.
+          # Patch 5: GamepadManager.B0(GamepadConnectionEvent)V — connect hook.
           # On controller-connect, libvfs lazily registers the virtual SDL joystick
           # and only emits SDL_JOYDEVICEADDED on first input. Until that fires,
           # winebus.so doesn't open the slot's joystick and rumble dispatches

@@ -1,6 +1,8 @@
 package com.xj.winemu.vibration;
 
 import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -22,22 +24,44 @@ import android.widget.TextView;
 /**
  * BhVibrationSettingsActivity — dialog-styled settings screen for PC-accurate rumble.
  *
- * Surfaces two controls:
+ * Surfaces two controls per game container:
  *   - Mode:      Off | Controller | Device | Both
  *   - Intensity: 0 – 100 %
  *
- * Values are stored per-container (keys suffixed with the active gameId) when
- * BhVibrationController has resolved one; otherwise stored as global defaults.
+ * Launched per-game from GameDetailSettingMenu via the static helper
+ * {@link #launch(Context, String, String)}. Settings are stored in the
+ * stock {@code pc_g_setting<gameId>} SharedPreferences file under prefixed
+ * keys ({@code bh_vibration_mode}, {@code bh_vibration_intensity}) so
+ * {@code BhSettingsExporter}'s existing per-game export/import path picks
+ * them up automatically. Older config files lacking these keys fall back
+ * to global defaults.
  */
 public class BhVibrationSettingsActivity extends Activity {
+
+    public static final String EXTRA_GAME_ID   = "bh_vibration.gameId";
+    public static final String EXTRA_GAME_NAME = "bh_vibration.gameName";
+
+    /** Launch entry point used by the BhVibrationLambda smali stub from
+     *  GameDetailSettingMenu's per-game options menu. */
+    public static void launch(Context ctx, String gameId, String gameName) {
+        Intent it = new Intent(ctx, BhVibrationSettingsActivity.class);
+        it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (gameId != null) it.putExtra(EXTRA_GAME_ID, gameId);
+        if (gameName != null) it.putExtra(EXTRA_GAME_NAME, gameName);
+        ctx.startActivity(it);
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         getWindow().setBackgroundDrawable(new ColorDrawable(0xCC000000));
 
+        String gameId   = getIntent() != null ? getIntent().getStringExtra(EXTRA_GAME_ID)   : null;
+        String gameName = getIntent() != null ? getIntent().getStringExtra(EXTRA_GAME_NAME) : null;
+
         BhVibrationController ctl = BhVibrationController.getInstance();
         ctl.init(this);
+        ctl.setContainerForSettings(gameId);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -52,11 +76,24 @@ public class BhVibrationSettingsActivity extends Activity {
         title.setTextColor(Color.WHITE);
         title.setTextSize(18);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(0, 0, 0, dp(12));
+        title.setPadding(0, 0, 0, dp(4));
         root.addView(title);
 
+        TextView subtitle = new TextView(this);
+        if (gameName != null && !gameName.isEmpty()) {
+            subtitle.setText(gameName);
+        } else if (gameId != null && !gameId.isEmpty()) {
+            subtitle.setText("Game " + gameId);
+        } else {
+            subtitle.setText("Global defaults");
+        }
+        subtitle.setTextColor(0xFFFFD54F);
+        subtitle.setTextSize(13);
+        subtitle.setPadding(0, 0, 0, dp(12));
+        root.addView(subtitle);
+
         TextView desc = new TextView(this);
-        desc.setText("Routes XInput rumble (low/high motor) from Wine games to the controller, the phone, or both. Per-container.");
+        desc.setText("Routes XInput rumble (low/high motor) from this Wine game to the controller, the phone, or both. Stored with the game's other PC settings.");
         desc.setTextColor(0xFFBBBBBB);
         desc.setTextSize(12);
         desc.setPadding(0, 0, 0, dp(16));

@@ -61,11 +61,34 @@ public final class BhVibrationController {
     public static final int MODE_DEVICE = 2;
     public static final int MODE_BOTH = 3;
 
-    public static final String PREFS_FILE = "bh_vibration_prefs";
-    public static final String KEY_MODE_PREFIX = "mode_";
-    public static final String KEY_INTENSITY_PREFIX = "intensity_";
-    public static final String KEY_MODE_GLOBAL = "mode";
-    public static final String KEY_INTENSITY_GLOBAL = "intensity";
+    // Storage scheme:
+    //   - Per-game settings live in stock GameHub's pc_g_setting<gameId>
+    //     SharedPreferences file under PER_GAME_KEY_* keys. This is the
+    //     same file BhSettingsExporter reads/writes during Export Config /
+    //     Import Config, so per-game vibration settings round-trip
+    //     automatically with no exporter changes. gameId here is the
+    //     same string GameDetailEntity exposes to the rest of the
+    //     codebase (numeric catalog id like "271590", or "local_<uuid>"
+    //     for locally-added games).
+    //   - Global defaults live in our own bh_vibration_prefs file under
+    //     GLOBAL_KEY_*. Used when a per-game value is absent (older
+    //     pc_g_setting files lacking our keys, or when running outside
+    //     a Wine session). New keys default to DEFAULT_MODE/INTENSITY,
+    //     so older imports without bh_vibration_* keys behave exactly
+    //     as before.
+    public static final String GLOBAL_PREFS_FILE  = "bh_vibration_prefs";
+    public static final String PER_GAME_PREFS_FMT = "pc_g_setting%s";
+    public static final String PER_GAME_KEY_MODE      = "bh_vibration_mode";
+    public static final String PER_GAME_KEY_INTENSITY = "bh_vibration_intensity";
+    public static final String GLOBAL_KEY_MODE      = "mode";
+    public static final String GLOBAL_KEY_INTENSITY = "intensity";
+
+    // Legacy. Older builds wrote per-container settings to
+    // bh_vibration_prefs with these prefixed keys (e.g. "mode_271590").
+    // We still READ them as a one-time fallback when the new pc_g_setting
+    // location has no value, but never write to them again.
+    private static final String LEGACY_MODE_PREFIX      = "mode_";
+    private static final String LEGACY_INTENSITY_PREFIX = "intensity_";
 
     // Stock behaviour: controller-on, full intensity. User can disable per container.
     private static final int DEFAULT_MODE = MODE_CONTROLLER;
@@ -109,7 +132,11 @@ public final class BhVibrationController {
     // ─────────────────────────────────────────────────────────────────────────
 
     private volatile Context appContext;
-    private volatile int containerId = -1;
+    /** String game identifier matching what GameDetailEntity exposes
+     *  ({@code "271590"} for catalog games, {@code "local_<uuid>"} for
+     *  locally-added games). null = no Wine session resolved yet, use
+     *  global defaults. */
+    private volatile String containerGameId = null;
     private volatile int cachedMode = DEFAULT_MODE;
     private volatile int cachedIntensity = DEFAULT_INTENSITY;
 
@@ -228,23 +255,29 @@ public final class BhVibrationController {
         reloadSettings();
     }
 
-    /** Invoked by the container-launch smali patch once it knows the active gameId. */
-    public void setContainer(int gameId) {
-        this.containerId = gameId;
+    /** Set per-game scope explicitly. Called from BhVibrationSettingsActivity
+     *  with the gameId carried in via Intent from the per-game settings menu. */
+    public void setContainerForSettings(String gameId) {
+        if (gameId == null || gameId.isEmpty()) {
+            this.containerGameId = null;
+        } else {
+            this.containerGameId = gameId;
+        }
         reloadSettings();
-        Log.i(TAG, "container=" + gameId + " mode=" + cachedMode + " intensity=" + cachedIntensity);
+        Log.i(TAG, "container=" + (containerGameId != null ? containerGameId : "(global)")
+                + " mode=" + cachedMode + " intensity=" + cachedIntensity);
     }
 
     /**
      * Walks the live-activity table for any running WineActivity and extracts
-     * its "gameId" Intent extra. Lets us scope prefs per-container without
-     * requiring a smali patch to WineActivity.onCreate.
+     * its "gameId" Intent extra. Lets us scope prefs per-container at dispatch
+     * time without requiring a smali patch to WineActivity.onCreate.
      *
-     * Called opportunistically from handleRumble — if nothing resolves yet, we
-     * stay on global settings until the user enters a Wine session.
+     * Called opportunistically from handleRumble — if nothing resolves yet,
+     * we stay on global defaults until the user enters a Wine session.
      */
     private void maybeResolveContainerFromActivityStack() {
-        if (containerId >= 0) return;
+        if (containerGameId != null) return;
         try {
             Class<?> atCls = Class.forName("android.app.ActivityThread");
             Method cur = atCls.getMethod("currentActivityThread");
@@ -266,20 +299,25 @@ public final class BhVibrationController {
                 if (it == null) continue;
                 String gid = it.getStringExtra("gameId");
                 if (gid == null || gid.isEmpty()) continue;
-                int parsed;
-                try { parsed = Integer.parseInt(gid); } catch (NumberFormatException e) { parsed = gid.hashCode(); }
-                setContainer(parsed);
+                this.containerGameId = gid;
+                reloadSettings();
+                Log.i(TAG, "container=" + gid + " mode=" + cachedMode + " intensity=" + cachedIntensity);
                 return;
             }
         } catch (Throwable ignored) { }
     }
 
-    /** Invoked from the settings UI when the user adjusts mode (0..3). */
+    /** Invoked from the settings UI when the user adjusts mode (0..3).
+     *  When a game is in scope, writes go to that game's pc_g_setting<gameId>
+     *  file (so Export Config picks them up). Always also updates the
+     *  global default in bh_vibration_prefs. */
     public void setMode(int mode) {
         if (mode < 0 || mode > 3) return;
         this.cachedMode = mode;
-        writeInt(KEY_MODE_PREFIX + containerId, mode);
-        writeInt(KEY_MODE_GLOBAL, mode);
+        writeIntGlobal(GLOBAL_KEY_MODE, mode);
+        if (containerGameId != null) {
+            writeIntPerGame(containerGameId, PER_GAME_KEY_MODE, mode);
+        }
     }
 
     /** Invoked from the settings UI when the user adjusts intensity (0..100). */
@@ -287,27 +325,14 @@ public final class BhVibrationController {
         if (pct < 0) pct = 0;
         if (pct > 100) pct = 100;
         this.cachedIntensity = pct;
-        writeInt(KEY_INTENSITY_PREFIX + containerId, pct);
-        writeInt(KEY_INTENSITY_GLOBAL, pct);
+        writeIntGlobal(GLOBAL_KEY_INTENSITY, pct);
+        if (containerGameId != null) {
+            writeIntPerGame(containerGameId, PER_GAME_KEY_INTENSITY, pct);
+        }
     }
 
     public int getMode() { return cachedMode; }
     public int getIntensity() { return cachedIntensity; }
-
-    /**
-     * Entry point invoked from the sidebar settings button (contentType=0x65).
-     * Kept as a single static so the smali click handler can stay tiny.
-     */
-    public static void launchSettings(Context ctx) {
-        if (ctx == null) return;
-        try {
-            android.content.Intent it = new android.content.Intent(ctx, BhVibrationSettingsActivity.class);
-            it.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-            ctx.startActivity(it);
-        } catch (Throwable t) {
-            Log.w(TAG, "launchSettings failed", t);
-        }
-    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Smali entry 1: GamepadServerManager.onRumble(slot, low, high)
@@ -974,23 +999,47 @@ public final class BhVibrationController {
         ensureContext();
         Context ctx = appContext;
         if (ctx == null) return;
-        SharedPreferences sp = ctx.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE);
-        int globalMode = sp.getInt(KEY_MODE_GLOBAL, DEFAULT_MODE);
-        int globalIntensity = sp.getInt(KEY_INTENSITY_GLOBAL, DEFAULT_INTENSITY);
-        if (containerId >= 0) {
-            cachedMode = sp.getInt(KEY_MODE_PREFIX + containerId, globalMode);
-            cachedIntensity = sp.getInt(KEY_INTENSITY_PREFIX + containerId, globalIntensity);
-        } else {
+
+        // Resolve global defaults first.
+        SharedPreferences gp = ctx.getSharedPreferences(GLOBAL_PREFS_FILE, Context.MODE_PRIVATE);
+        int globalMode = gp.getInt(GLOBAL_KEY_MODE, DEFAULT_MODE);
+        int globalIntensity = gp.getInt(GLOBAL_KEY_INTENSITY, DEFAULT_INTENSITY);
+
+        if (containerGameId == null) {
             cachedMode = globalMode;
             cachedIntensity = globalIntensity;
+            return;
         }
+
+        // Per-game: prefer pc_g_setting<gameId> values. Fall back to legacy
+        // bh_vibration_prefs entries (older builds wrote there) so users
+        // upgrading don't lose their per-container preferences. Final
+        // fallback is the global default. Older imported pc_g_setting
+        // files lacking our keys naturally end up at the global default.
+        SharedPreferences pgp = ctx.getSharedPreferences(
+                String.format(PER_GAME_PREFS_FMT, containerGameId), Context.MODE_PRIVATE);
+
+        int legacyMode = gp.getInt(LEGACY_MODE_PREFIX + containerGameId, globalMode);
+        int legacyIntensity = gp.getInt(LEGACY_INTENSITY_PREFIX + containerGameId, globalIntensity);
+
+        cachedMode = pgp.getInt(PER_GAME_KEY_MODE, legacyMode);
+        cachedIntensity = pgp.getInt(PER_GAME_KEY_INTENSITY, legacyIntensity);
     }
 
-    private void writeInt(String key, int val) {
+    private void writeIntGlobal(String key, int val) {
         ensureContext();
         Context ctx = appContext;
         if (ctx == null) return;
-        ctx.getSharedPreferences(PREFS_FILE, Context.MODE_PRIVATE)
+        ctx.getSharedPreferences(GLOBAL_PREFS_FILE, Context.MODE_PRIVATE)
+                .edit().putInt(key, val).apply();
+    }
+
+    private void writeIntPerGame(String gameId, String key, int val) {
+        ensureContext();
+        Context ctx = appContext;
+        if (ctx == null || gameId == null || gameId.isEmpty()) return;
+        ctx.getSharedPreferences(String.format(PER_GAME_PREFS_FMT, gameId),
+                                  Context.MODE_PRIVATE)
                 .edit().putInt(key, val).apply();
     }
 
