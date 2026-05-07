@@ -597,33 +597,37 @@ public final class BhVibrationController {
                 Log.i(TAG, "wake-up: no GamepadState for slot " + slot);
                 return;
             }
-            // Read current left-X via the underlying ByteBuffer (field 'a')
-            // so the perturbation can be reverted to the EXACT value the
-            // user / natural input pipeline last wrote.
-            java.lang.reflect.Field bufField = state.getClass().getDeclaredField("a");
-            bufField.setAccessible(true);
-            final java.nio.ByteBuffer buf = (java.nio.ByteBuffer) bufField.get(state);
-            if (buf == null) {
-                Log.w(TAG, "wake-up: GamepadState ByteBuffer null slot=" + slot);
-                return;
-            }
-            final short before = buf.getShort(0);
-            final short perturbed = (short) (before ^ 1);
-            buf.putShort(0, perturbed);
+            // Wake-up via button-press flicker on a high button index that
+            // no real game maps. Wine's bus_sdl.c process_device_event
+            // *drops* button events on unregistered SDL_JoystickIDs (just
+            // logs a WARN — confirmed reading wine-10.0 source), so a
+            // button event on the SDL queue isn't what wakes things. The
+            // real wake-up must come from libvfs lazily emitting
+            // SDL_JOYDEVICEADDED on first-input — which axis flicker
+            // failed to trigger reliably for some slots in multi-controller
+            // setups, but a button STATE change might (libvfs's poller
+            // may check button bytes for the lazy-attach trigger).
+            //
+            // Use button index 14 — outermost reachable via GamepadState.b
+            // (range check is `p1 < 0xf`) and unmapped by every common
+            // XInput game we care about. Sequence: press, then release
+            // 50 ms later. If the user is genuinely pressing button 14
+            // mid-flicker the natural input pipeline overwrites within
+            // ~16 ms; net effect is still a state change libvfs notices.
+            final Method writeButton = state.getClass()
+                    .getDeclaredMethod("b", int.class, boolean.class);
+            writeButton.setAccessible(true);
+            final int wakeButton = 14;
+            writeButton.invoke(state, wakeButton, true);
             Log.i(TAG, "wake-up fired slot=" + slot
-                    + " left-X " + before + " → " + perturbed);
+                    + " button[" + wakeButton + "] press");
             worker.postDelayed(new Runnable() {
                 @Override public void run() {
                     try {
-                        // Only restore to `before` if the slot still holds our
-                        // perturbed value; otherwise natural input has claimed
-                        // it and we shouldn't stomp the user's actual stick
-                        // position.
-                        if (buf.getShort(0) == perturbed) {
-                            buf.putShort(0, before);
-                        }
+                        writeButton.invoke(state, wakeButton, false);
+                        Log.i(TAG, "wake-up complete slot=" + slot);
                     } catch (Throwable t) {
-                        Log.w(TAG, "wake-up restore failed slot=" + slot, t);
+                        Log.w(TAG, "wake-up release failed slot=" + slot, t);
                     }
                 }
             }, 50L);
