@@ -476,49 +476,69 @@ public final class BhVibrationController {
      * emit SDL_JOYDEVICEADDED so winebus.so can open the joystick before
      * the user provides any input.
      *
+     * Multi-shot: a single +200ms wake-up worked on the first controller-
+     * connect of a session (winedevice.exe was already alive and its
+     * libvfs had mmap'd the shared buffer), but failed on subsequent
+     * connects when the user restarted the tester — that respawned
+     * winedevice.exe, and our +200ms axis flicker landed BEFORE the new
+     * winedevice's libvfs had mmap'd, so the write was invisible. We
+     * fire 3 axis flickers at staggered delays so at least one lands
+     * after libvfs is ready.
+     *
      * Done via reflection because the relevant Tencent gamepad classes
      * (GamepadServerManager, GamepadState) aren't on our compile classpath.
      * Method names: GamepadServerManager.g(int) → GamepadState; and
      * GamepadState.e(short) writes left-stick X via ByteBuffer.putShort(0, v).
      */
+    private static final long[] WAKEUP_DELAYS_MS = { 500L, 2000L, 5000L };
+
     private void handleScheduleWakeup(final Object serverManager, final int slot) {
         if (serverManager == null || slot < 0 || slot >= MAX_SLOTS) {
             return;
         }
-        Log.i(TAG, "wake-up scheduled slot=" + slot);
-        worker.postDelayed(new Runnable() {
-            @Override public void run() {
-                try {
-                    Method getState = serverManager.getClass()
-                            .getDeclaredMethod("g", int.class);
-                    getState.setAccessible(true);
-                    final Object state = getState.invoke(serverManager, slot);
-                    if (state == null) {
-                        Log.i(TAG, "wake-up: no GamepadState for slot " + slot);
-                        return;
-                    }
-                    final Method writeAxisX = state.getClass()
-                            .getDeclaredMethod("e", short.class);
-                    writeAxisX.setAccessible(true);
-                    // Value 1 is well below any reasonable deadzone — invisible
-                    // to the game, but enough of a state change for libvfs's
-                    // poller to register and notify SDL.
-                    writeAxisX.invoke(state, (short) 1);
-                    worker.postDelayed(new Runnable() {
-                        @Override public void run() {
-                            try {
-                                writeAxisX.invoke(state, (short) 0);
-                                Log.i(TAG, "wake-up complete slot=" + slot);
-                            } catch (Throwable t) {
-                                Log.w(TAG, "wake-up reset failed slot=" + slot, t);
-                            }
-                        }
-                    }, 50L);
-                } catch (Throwable t) {
-                    Log.w(TAG, "wake-up dispatch failed slot=" + slot, t);
+        Log.i(TAG, "wake-up scheduled slot=" + slot
+                + " (multi-shot at " + java.util.Arrays.toString(WAKEUP_DELAYS_MS) + " ms)");
+        for (final long delay : WAKEUP_DELAYS_MS) {
+            worker.postDelayed(new Runnable() {
+                @Override public void run() {
+                    fireWakeupShot(serverManager, slot, delay);
                 }
+            }, delay);
+        }
+    }
+
+    private void fireWakeupShot(Object serverManager, int slot, long delayTag) {
+        try {
+            Method getState = serverManager.getClass()
+                    .getDeclaredMethod("g", int.class);
+            getState.setAccessible(true);
+            final Object state = getState.invoke(serverManager, slot);
+            if (state == null) {
+                Log.i(TAG, "wake-up [+" + delayTag + "ms]: no GamepadState for slot " + slot);
+                return;
             }
-        }, 200L);
+            final Method writeAxisX = state.getClass()
+                    .getDeclaredMethod("e", short.class);
+            writeAxisX.setAccessible(true);
+            // Value 1 is well below any reasonable deadzone — invisible
+            // to the game, but enough of a state change for libvfs's
+            // poller to register and notify SDL.
+            writeAxisX.invoke(state, (short) 1);
+            // Reset to neutral 50 ms later. Using post-delayed so we don't
+            // hold the worker thread sleeping.
+            worker.postDelayed(new Runnable() {
+                @Override public void run() {
+                    try {
+                        writeAxisX.invoke(state, (short) 0);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "wake-up reset failed slot=" + slot, t);
+                    }
+                }
+            }, 50L);
+            Log.i(TAG, "wake-up shot fired slot=" + slot + " [+" + delayTag + "ms]");
+        } catch (Throwable t) {
+            Log.w(TAG, "wake-up shot failed slot=" + slot + " [+" + delayTag + "ms]", t);
+        }
     }
 
     /**
