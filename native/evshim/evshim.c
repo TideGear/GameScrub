@@ -347,55 +347,17 @@ static void *got_patcher_thread(void *arg)
     return NULL;
 }
 
-/* dlopen interpose — primary trigger. Catches winebus.so the moment any
- * code dlopens it, eliminating the timing race entirely. Recursion-guarded
- * via __thread flag; falls through to real_dlopen for everything else
- * with near-zero overhead (just a strstr against the filename).
+/* No dlopen interpose. Earlier attempts (try 4 inline patch, try 4b
+ * spawn-thread-from-dlopen) both broke launch. Try 4 hung in linker
+ * deadlock (dl_iterate_phdr inside dlopen's writer lock); try 4b made
+ * Wine subprocesses exit before even reaching winebus.so load — root
+ * cause unclear but pthread_create from within dlopen interpose seems
+ * to interfere with Wine's startup somehow.
  *
- * IMPORTANT: when the match fires, we DON'T call try_patch_winebus()
- * directly. dlopen holds the linker writer lock; dl_iterate_phdr inside
- * try_patch_winebus needs the reader lock. On bionic that combination
- * deadlocks (try 4 first cut: 60-second hang, then BannerHub watchdog
- * SIGKILL). Instead we spawn a tiny detached thread that sleeps briefly
- * to let dlopen complete and release its locks, then runs the patch
- * outside the dlopen context. */
-
-static void *(*real_dlopen)(const char *, int) = NULL;
-static __thread int t_in_dlopen = 0;
-
-static void *deferred_patch_thread(void *arg)
-{
-    (void)arg;
-    /* Brief sleep to let dlopen finish + linker release the writer lock.
-     * 20 ms is generous; in practice dlopen returns within microseconds
-     * after the post-load callbacks fire. */
-    usleep(20 * 1000);
-    try_patch_winebus();
-    return NULL;
-}
-
-void *dlopen(const char *filename, int flag)
-{
-    if (!real_dlopen) {
-        real_dlopen = dlsym(RTLD_NEXT, "dlopen");
-        if (!real_dlopen) return NULL;
-    }
-
-    void *h = real_dlopen(filename, flag);
-
-    if (h && filename && !s_winebus_patched && !t_in_dlopen) {
-        if (strstr(filename, "winebus.so")) {
-            t_in_dlopen = 1;
-            LOG("dlopen interposed: winebus.so loaded (%s)", filename);
-            pthread_t tid;
-            if (pthread_create(&tid, NULL, deferred_patch_thread, NULL) == 0) {
-                pthread_detach(tid);
-            }
-            t_in_dlopen = 0;
-        }
-    }
-    return h;
-}
+ * We rely on the polling thread alone now. Cadence is 10 s, so the
+ * patch lands within 10 s of winebus.so loading. Wine's HID stack
+ * init typically completes long before any user input triggers
+ * rumble, so the delay is invisible in practice. */
 
 /* Force libSDL2-2.0.so into the global linker namespace before libvfs.so
  * gets a chance to dlopen it RTLD_LOCAL. Without this, libvfs.so's later
