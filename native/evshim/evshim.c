@@ -36,6 +36,7 @@
 #include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <link.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -43,6 +44,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 /* Opaque SDL2 type — we never dereference, just pass through. */
@@ -472,6 +474,44 @@ static int patch_winebus_at_base(uintptr_t base)
     return patched > 0;
 }
 
+/* Write a "winedevice ready" marker file so BannerHub Java side knows
+ * libvfs-client has finished initializing in this winedevice process and
+ * is ready to receive GamepadState writes. BhVibrationController watches
+ * for this marker (FileObserver) and then fires its synthetic axis-flicker
+ * wake-up — replacing the previous fragile multi-shot timing approach.
+ *
+ * Path: ${BH_FILES_DIR}/.bh_winedevice_ready (BH_FILES_DIR set by Tencent's
+ * launch code, == /data/user/0/<pkg>/files). Falls back to deriving from
+ * WINEMU_ROOT_FS, then to a hardcoded com.tencent.ig path. unlink+create
+ * to guarantee a fresh CREATE inotify event on respawns where the marker
+ * already exists from the previous winedevice incarnation. */
+static void write_ready_marker(void)
+{
+    char path[512];
+    const char *root = getenv("BH_FILES_DIR");
+    if (root && *root) {
+        snprintf(path, sizeof(path), "%s/.bh_winedevice_ready", root);
+    } else if ((root = getenv("WINEMU_ROOT_FS")) != NULL && *root) {
+        snprintf(path, sizeof(path), "%s/files/.bh_winedevice_ready", root);
+    } else {
+        snprintf(path, sizeof(path),
+                 "/data/user/0/com.tencent.ig/files/.bh_winedevice_ready");
+    }
+    /* Force a fresh CREATE event even if a stale marker exists. */
+    unlink(path);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        LOGE("ready marker open failed: %s (errno=%d, %s)",
+             path, errno, strerror(errno));
+        return;
+    }
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "pid=%d\n", (int)getpid());
+    if (n > 0) (void)write(fd, buf, (size_t)n);
+    close(fd);
+    LOG("wrote ready marker: %s", path);
+}
+
 /* One-shot patcher thread. Runs exactly once, 5 seconds after spawn,
  * then exits. No polling, no periodic activity. */
 static void *one_shot_patcher_thread(void *arg)
@@ -492,6 +532,11 @@ static void *one_shot_patcher_thread(void *arg)
     LOG("patcher: winebus.so base=0x%lx pid=%d", (unsigned long)base, (int)getpid());
     if (patch_winebus_at_base(base)) {
         s_winebus_patched = 1;
+        /* Patch landed → libvfs-client is fully initialized in this
+         * winedevice process (winebus.so is loaded after libvfs init).
+         * Tell Java side the shared GamepadState buffer is now safe to
+         * write to. */
+        write_ready_marker();
     }
     return NULL;
 }

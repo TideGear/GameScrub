@@ -15,9 +15,14 @@ import android.os.VibratorManager;
 import android.util.Log;
 import android.view.InputDevice;
 
+import android.os.FileObserver;
+
+import java.io.File;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLongArray;
 
@@ -470,74 +475,140 @@ public final class BhVibrationController {
     }
 
     /**
-     * Wake up libvfs's lazily-registered virtual joystick for the newly-
-     * connected slot by writing a synthetic near-zero left-stick X axis
-     * value, then resetting to neutral. The state change makes libvfs
-     * emit SDL_JOYDEVICEADDED so winebus.so can open the joystick before
-     * the user provides any input.
+     * Wake up libvfs's lazily-registered virtual joystick by writing a
+     * synthetic near-zero left-stick X to the slot's GamepadState, which
+     * triggers libvfs-client (in winedevice.exe) to emit SDL_JOYDEVICEADDED
+     * so winebus.so can open the joystick before the user provides input.
      *
-     * Multi-shot: a single +200ms wake-up worked on the first controller-
-     * connect of a session (winedevice.exe was already alive and its
-     * libvfs had mmap'd the shared buffer), but failed on subsequent
-     * connects when the user restarted the tester — that respawned
-     * winedevice.exe, and our +200ms axis flicker landed BEFORE the new
-     * winedevice's libvfs had mmap'd, so the write was invisible. We
-     * fire 3 axis flickers at staggered delays so at least one lands
-     * after libvfs is ready.
+     * Detection-driven, not timing-driven: connects are queued in
+     * pendingWakeups and fired only when libevshim writes the
+     * .bh_winedevice_ready marker file from inside winedevice.exe (after
+     * its winebus GOT patch lands, which by construction is AFTER libvfs-
+     * client has fully initialized its mmap'd shared buffer). A FileObserver
+     * on the marker drains the queue. Eliminates the timing guess of the
+     * earlier multi-shot approach.
      *
-     * Done via reflection because the relevant Tencent gamepad classes
-     * (GamepadServerManager, GamepadState) aren't on our compile classpath.
-     * Method names: GamepadServerManager.g(int) → GamepadState; and
-     * GamepadState.e(short) writes left-stick X via ByteBuffer.putShort(0, v).
+     * Read-modify-restore to avoid stomping active stick input: read
+     * current axis value, write current^1 (flips low bit, always a state
+     * change), then 50 ms later restore exactly the original value. If
+     * the user is moving the stick during the wake-up window the natural
+     * input flow's next 60-Hz frame overwrites our value within ~16 ms.
+     *
+     * All Tencent class access via reflection because GamepadServerManager
+     * and GamepadState aren't on our compile classpath. Field/method names:
+     *   GamepadServerManager.g(int) → GamepadState
+     *   GamepadState.a (ByteBuffer field, holds the shared mmap'd state)
      */
-    private static final long[] WAKEUP_DELAYS_MS = { 500L, 2000L, 5000L };
+    private static final String READY_MARKER_NAME = ".bh_winedevice_ready";
+
+    private final Map<Integer, Object> pendingWakeups = new ConcurrentHashMap<>();
+    private final AtomicBoolean readinessWatcherStarted = new AtomicBoolean(false);
+    private volatile FileObserver readinessObserver;
 
     private void handleScheduleWakeup(final Object serverManager, final int slot) {
         if (serverManager == null || slot < 0 || slot >= MAX_SLOTS) {
             return;
         }
-        Log.i(TAG, "wake-up scheduled slot=" + slot
-                + " (multi-shot at " + java.util.Arrays.toString(WAKEUP_DELAYS_MS) + " ms)");
-        for (final long delay : WAKEUP_DELAYS_MS) {
-            worker.postDelayed(new Runnable() {
-                @Override public void run() {
-                    fireWakeupShot(serverManager, slot, delay);
-                }
-            }, delay);
+        ensureReadinessWatcher();
+        pendingWakeups.put(slot, serverManager);
+        Log.i(TAG, "wake-up queued slot=" + slot + " (awaiting winedevice ready marker)");
+
+        // If the marker already exists from an earlier patcher run, the
+        // FileObserver won't fire — drain immediately.
+        File marker = readyMarkerFile();
+        if (marker != null && marker.exists()) {
+            Log.i(TAG, "wake-up: marker already exists, firing immediately");
+            drainPendingWakeups();
         }
     }
 
-    private void fireWakeupShot(Object serverManager, int slot, long delayTag) {
+    private File readyMarkerFile() {
+        Context ctx = appContext;
+        if (ctx == null) return null;
+        File dir = ctx.getFilesDir();
+        if (dir == null) return null;
+        return new File(dir, READY_MARKER_NAME);
+    }
+
+    private void ensureReadinessWatcher() {
+        if (readinessWatcherStarted.get()) return;
+        Context ctx = appContext;
+        if (ctx == null) return;
+        File dir = ctx.getFilesDir();
+        if (dir == null) return;
+        if (!readinessWatcherStarted.compareAndSet(false, true)) return;
+
+        // Watch CREATE (fresh marker after a winedevice respawn — evshim
+        // unlinks before recreating to guarantee this fires) and MODIFY
+        // (in case the unlink races with FileObserver registration).
+        FileObserver fo = new FileObserver(dir.getAbsolutePath(),
+                FileObserver.CREATE | FileObserver.MODIFY | FileObserver.MOVED_TO) {
+            @Override public void onEvent(int event, String path) {
+                if (path == null) return;
+                if (!READY_MARKER_NAME.equals(path)) return;
+                Log.i(TAG, "winedevice ready marker observed (event=0x" + Integer.toHexString(event) + ")");
+                worker.post(new Runnable() {
+                    @Override public void run() { drainPendingWakeups(); }
+                });
+            }
+        };
+        fo.startWatching();
+        readinessObserver = fo;
+        Log.i(TAG, "readiness watcher started on " + dir.getAbsolutePath());
+    }
+
+    private void drainPendingWakeups() {
+        if (pendingWakeups.isEmpty()) return;
+        for (Map.Entry<Integer, Object> e : pendingWakeups.entrySet()) {
+            int slot = e.getKey();
+            Object serverManager = e.getValue();
+            fireWakeup(serverManager, slot);
+        }
+        pendingWakeups.clear();
+    }
+
+    private void fireWakeup(Object serverManager, final int slot) {
         try {
             Method getState = serverManager.getClass()
                     .getDeclaredMethod("g", int.class);
             getState.setAccessible(true);
             final Object state = getState.invoke(serverManager, slot);
             if (state == null) {
-                Log.i(TAG, "wake-up [+" + delayTag + "ms]: no GamepadState for slot " + slot);
+                Log.i(TAG, "wake-up: no GamepadState for slot " + slot);
                 return;
             }
-            final Method writeAxisX = state.getClass()
-                    .getDeclaredMethod("e", short.class);
-            writeAxisX.setAccessible(true);
-            // Value 1 is well below any reasonable deadzone — invisible
-            // to the game, but enough of a state change for libvfs's
-            // poller to register and notify SDL.
-            writeAxisX.invoke(state, (short) 1);
-            // Reset to neutral 50 ms later. Using post-delayed so we don't
-            // hold the worker thread sleeping.
+            // Read current left-X via the underlying ByteBuffer (field 'a')
+            // so the perturbation can be reverted to the EXACT value the
+            // user / natural input pipeline last wrote.
+            java.lang.reflect.Field bufField = state.getClass().getDeclaredField("a");
+            bufField.setAccessible(true);
+            final java.nio.ByteBuffer buf = (java.nio.ByteBuffer) bufField.get(state);
+            if (buf == null) {
+                Log.w(TAG, "wake-up: GamepadState ByteBuffer null slot=" + slot);
+                return;
+            }
+            final short before = buf.getShort(0);
+            final short perturbed = (short) (before ^ 1);
+            buf.putShort(0, perturbed);
+            Log.i(TAG, "wake-up fired slot=" + slot
+                    + " left-X " + before + " → " + perturbed);
             worker.postDelayed(new Runnable() {
                 @Override public void run() {
                     try {
-                        writeAxisX.invoke(state, (short) 0);
+                        // Only restore to `before` if the slot still holds our
+                        // perturbed value; otherwise natural input has claimed
+                        // it and we shouldn't stomp the user's actual stick
+                        // position.
+                        if (buf.getShort(0) == perturbed) {
+                            buf.putShort(0, before);
+                        }
                     } catch (Throwable t) {
-                        Log.w(TAG, "wake-up reset failed slot=" + slot, t);
+                        Log.w(TAG, "wake-up restore failed slot=" + slot, t);
                     }
                 }
             }, 50L);
-            Log.i(TAG, "wake-up shot fired slot=" + slot + " [+" + delayTag + "ms]");
         } catch (Throwable t) {
-            Log.w(TAG, "wake-up shot failed slot=" + slot + " [+" + delayTag + "ms]", t);
+            Log.w(TAG, "wake-up failed slot=" + slot, t);
         }
     }
 
