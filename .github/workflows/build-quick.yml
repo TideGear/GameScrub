@@ -539,8 +539,10 @@ jobs:
           #
           # We extract slot via GamepadSlotManager.m(GamepadDevice)I (field e on
           # GamepadManager) and pass the GamepadServerManager (field c) plus slot
-          # to BhVibrationController.scheduleWakeup, which writes a synthetic
-          # near-zero left-stick value 200ms later to trigger libvfs's onInput.
+          # to BhVibrationController.scheduleWakeup, which queues a button-14
+          # flicker on the slot's GamepadState gated on libevshim's winedevice
+          # ready marker. drainPendingWakeups() then fires staggered (200 ms per
+          # slot, ascending) so libvfs registers each slot before the next.
           #
           # Inject BEFORE stock body so registers v0..v3 (declared by .locals 4)
           # are reused after our injection — stock's first instruction

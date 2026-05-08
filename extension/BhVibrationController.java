@@ -42,12 +42,15 @@ import java.util.concurrent.atomic.AtomicLongArray;
  *     the stock dispatch (which lacks amplitude-control checks, VibrationAttributes,
  *     and CombinedVibration.startParallel).
  *   - scheduleWakeup(serverManager, slot): post-connect wake-up, invoked at the
- *     head of GamepadManager.B0(GamepadConnectionEvent)V. Writes a synthetic
- *     near-zero left-stick X to the slot's GamepadState so libvfs's poller
- *     sees a state change and triggers SDL_JOYDEVICEADDED, which lets winebus
- *     open the joystick BEFORE the user has pressed anything (otherwise rumble
- *     silently no-ops on freshly-connected controllers in multi-controller
- *     setups until each is "activated" by an input event).
+ *     head of GamepadManager.B0(GamepadConnectionEvent)V. Queues a synthetic
+ *     button-14 press/release on the slot's GamepadState — libvfs's poller
+ *     sees the button-byte change and emits SDL_JOYDEVICEADDED, which lets
+ *     winebus open the joystick BEFORE the user has pressed anything
+ *     (otherwise rumble silently no-ops on freshly-connected controllers in
+ *     multi-controller setups until each is "activated" by an input event).
+ *     Wake-ups are gated on a winedevice readiness marker written by libevshim
+ *     and staggered 200 ms per slot ascending so libvfs has time to register
+ *     each before the next stimulus arrives.
  *
  * Modes:
  *   0 = Off         — no rumble anywhere
@@ -406,10 +409,11 @@ public final class BhVibrationController {
     // (and Nth) controller's rumble fail until they press any button on it.
     //
     // This hook fires once per connect with the GamepadServerManager + slot
-    // available. We schedule a 200 ms delayed task that writes a synthetic
-    // near-zero left-stick X (value=1, well below any deadzone) to the slot's
-    // GamepadState ByteBuffer, then resets to 0 50 ms later. libvfs's poller
-    // sees the state change → emits SDL_JOYDEVICEADDED → winebus opens the
+    // available. We queue a wake-up gated on a winedevice readiness marker
+    // written by libevshim; once the marker fires, drainPendingWakeups()
+    // staggers each slot's button-14 press/release through the slot's
+    // GamepadState (200 ms apart, ascending). libvfs's poller sees the
+    // button-byte change → emits SDL_JOYDEVICEADDED → winebus opens the
     // joystick → rumble dispatch works without user input.
     //
     // Reflection-based to avoid compile-time dependency on Tencent's
@@ -512,10 +516,10 @@ public final class BhVibrationController {
     }
 
     /**
-     * Wake up libvfs's lazily-registered virtual joystick by writing a
-     * synthetic near-zero left-stick X to the slot's GamepadState, which
-     * triggers libvfs-client (in winedevice.exe) to emit SDL_JOYDEVICEADDED
-     * so winebus.so can open the joystick before the user provides input.
+     * Wake up libvfs's lazily-registered virtual joystick by toggling a
+     * button bit in the slot's GamepadState, which triggers libvfs-client
+     * (in winedevice.exe) to emit SDL_JOYDEVICEADDED so winebus.so can
+     * open the joystick before the user provides input.
      *
      * Detection-driven, not timing-driven: connects are queued in
      * pendingWakeups and fired only when libevshim writes the
@@ -525,16 +529,19 @@ public final class BhVibrationController {
      * on the marker drains the queue. Eliminates the timing guess of the
      * earlier multi-shot approach.
      *
-     * Read-modify-restore to avoid stomping active stick input: read
-     * current axis value, write current^1 (flips low bit, always a state
-     * change), then 50 ms later restore exactly the original value. If
-     * the user is moving the stick during the wake-up window the natural
-     * input flow's next 60-Hz frame overwrites our value within ~16 ms.
+     * Stimulus is a button-14 press/release (50 ms apart) via
+     * GamepadState.b(int, boolean). Index 14 is the highest the
+     * range check `p1 < 0xf` accepts (storage offset = 12 + index → byte
+     * 26, well past the axis bytes at 0..11) and is unmapped by every
+     * common XInput-targeting game (XInput defines 14 buttons, indices
+     * 0..13). Empirically axis flicker failed for slot >=1 in multi-
+     * controller setups; button flicker works because libvfs's poller
+     * checks button bytes for the lazy-attach trigger.
      *
      * All Tencent class access via reflection because GamepadServerManager
      * and GamepadState aren't on our compile classpath. Field/method names:
-     *   GamepadServerManager.g(int) → GamepadState
-     *   GamepadState.a (ByteBuffer field, holds the shared mmap'd state)
+     *   GamepadServerManager.g(int)        → GamepadState
+     *   GamepadState.b(int, boolean)       → write button byte
      */
     private static final String READY_MARKER_NAME = ".bh_winedevice_ready";
 
