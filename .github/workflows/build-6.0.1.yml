@@ -1,0 +1,141 @@
+name: Build APK (GameHub 6.0.1 — vibration mod only)
+
+# Slim build for the BannerHub vibration mod ported to GameHub 6.0.1.
+# Skips every other BannerHub patch (AppUtils phone-home, Grant Root,
+# Settings Import/Export, GOG extension dex, etc.) because they target
+# 5.3.5 anchors that don't exist or have moved in 6.0.1. The result is
+# a 6.0.1 APK with PC-accurate dual-motor rumble + libevshim sustained
+# rumble keepalive, otherwise unchanged from upstream.
+#
+# Setup once: upload the GameHub 6.0.1 APK as an asset on a release
+# tagged `base-apk-6.0.1` in this repo. The workflow `gh release
+# download`s from there.
+
+on:
+  push:
+    tags:
+      - 'v*-6.0.1*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download original 6.0.1 APK
+        run: |
+          gh release download base-apk-6.0.1 --pattern "*.apk" -D base/ -R ${{ github.repository }}
+          ls base/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install apktool
+        run: |
+          APKTOOL_VER=2.9.3
+          mkdir -p $HOME/bin
+          wget -q "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar" -O $HOME/bin/apktool.jar
+          wget -q "https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool" -O $HOME/bin/apktool
+          chmod +x $HOME/bin/apktool
+          echo "$HOME/bin" >> $GITHUB_PATH
+          java -jar $HOME/bin/apktool.jar --version
+
+      - name: Decompile APK
+        run: |
+          APK=$(ls base/*.apk | head -1)
+          echo "Decompiling: $APK"
+          java -jar $HOME/bin/apktool.jar d "$APK" -o apktool_out -f
+
+      - name: Strip newer-Android manifest attributes apktool 2.9.3 can't reassemble
+        run: |
+          # 6.0.1's AndroidManifest uses two attributes whose namespaces aren't in
+          # the framework apktool 2.9.3 ships with. They're cosmetic (BLUETOOTH_SCAN
+          # flag + predictive-back opt-in); stripping is harmless for a vibration-mod
+          # test build.
+          python3 - <<'PYEOF'
+          import re
+          with open('apktool_out/AndroidManifest.xml', 'r', encoding='utf-8') as f:
+              content = f.read()
+          content = re.sub(r' android:usesPermissionFlags="[^"]*"', '', content)
+          content = re.sub(r' android:enableOnBackInvokedCallback="[^"]*"', '', content)
+          with open('apktool_out/AndroidManifest.xml', 'w', encoding='utf-8') as f:
+              f.write(content)
+          print("manifest stripped")
+          PYEOF
+
+      - name: Apply BhVibration smali patches (6.0.1)
+        run: |
+          # Path inside apply_vibration_patches.py uses smali_classes3/* and
+          # the obfuscated 6.0.1 class names (g58, sc5, etc.) — see
+          # patches-6.0.1/README.md for the rename map.
+          python3 patches-6.0.1/apply_vibration_patches.py apktool_out
+
+      - name: Build libevshim.so (guest-side SDL keepalive)
+        run: |
+          set -e
+          NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          if [ -z "$NDK_HOME" ] || [ ! -d "$NDK_HOME" ]; then
+            NDK_HOME=$(ls -d "${ANDROID_SDK_ROOT}"/ndk/* 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -z "$NDK_HOME" ] || [ ! -d "$NDK_HOME" ]; then
+            NDK_HOME="${ANDROID_SDK_ROOT}/ndk-bundle"
+          fi
+          echo "Using NDK: $NDK_HOME"
+          if ! command -v ninja >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ninja-build
+          fi
+          cmake -S patches-6.0.1/evshim -B build/evshim \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -G Ninja
+          ninja -C build/evshim
+          mkdir -p apktool_out/lib/arm64-v8a
+          cp build/evshim/libevshim.so apktool_out/lib/arm64-v8a/libevshim.so
+          chmod 0755 apktool_out/lib/arm64-v8a/libevshim.so
+          file apktool_out/lib/arm64-v8a/libevshim.so
+
+      - name: Rebuild and sign
+        run: |
+          set -e
+
+          # Rebuild
+          java -jar $HOME/bin/apktool.jar b apktool_out -o rebuilt-unsigned.apk
+
+          # Compile vibration extension Java + d8 to classes7.dex
+          # (6.0.1 base APK has 6 dex files; classes7 is the next free slot.)
+          ANDROID_JAR=$(ls $ANDROID_SDK_ROOT/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)
+          mkdir -p ext_classes
+          javac -source 8 -target 8 -cp "$ANDROID_JAR" -d ext_classes \
+              patches-6.0.1/BhVibrationController.java \
+              patches-6.0.1/BhVibrationSettingsActivity.java
+          BUILD_TOOLS=$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)
+          mkdir -p ext_dex
+          $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/d8 \
+              --release --min-api 26 --output ext_dex \
+              $(find ext_classes -name "*.class")
+          cp ext_dex/classes.dex classes7.dex
+          zip -j rebuilt-unsigned.apk classes7.dex
+
+          # Align
+          $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/zipalign -f -v 4 \
+              rebuilt-unsigned.apk rebuilt-aligned.apk
+
+          # Sign with the repo's testkey (same as 5.3.5 build)
+          $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/apksigner sign \
+              --key testkey.pk8 --cert testkey.x509.pem \
+              --out BannerHub-6.0.1-vib.apk \
+              rebuilt-aligned.apk
+          ls -lh BannerHub-6.0.1-vib.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BannerHub-6.0.1-vib
+          path: BannerHub-6.0.1-vib.apk
