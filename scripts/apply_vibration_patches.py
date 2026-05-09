@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """
-Apply BannerHub PC-accurate vibration patches to a decompiled GameHub 6.0.1
-apktool tree.
+Apply PC-accurate vibration patches to a decompiled GameHub 6.0.1
+apktool tree. Four hooks:
 
-GameHub 6.0.1 fixed the multi-controller lazy-attach issue natively, so the
-B0 connect hook + GamepadState wake-up reflection are dropped. What remains:
-
-  1. GamepadServerManager.onRumble(III)V  — entry hook (label only changed)
-  2. g58.g(II)V                            — controller rumble dispatch
-                                             (was GamepadDevice$Physical.h)
+  1. GamepadServerManager.onRumble(III)V  — entry hook for the dispatcher
+  2. g58.g(II)V                            — per-controller rumble dispatch
+                                             (was GamepadDevice$Physical.h
+                                             in 5.3.5)
   3. g58.f()V                              — stop hook for keepalive cleanup
-                                             (was GamepadDevice$Physical.g)
+                                             (was GamepadDevice$Physical.g
+                                             in 5.3.5)
   4. sc5.smali / EnvVars LD_PRELOAD path   — prepend libevshim.so for SDL
                                              1 s auto-expiry keepalive
                                              (sustained rumble fix)
 
-Per-game settings UI insertion is NOT yet ported (popup-menu architecture
-in 6.0.1 is restructured; users can still adjust mode via SharedPreferences
-or a future UI patch). Settings save/load via the controller still works.
+Per-game settings UI insertion is NOT ported yet (the 6.0.1 popup-menu
+architecture differs from 5.3.5). Global mode/intensity work fine via
+the BhVibrationSettingsActivity launched directly.
 
 Usage:
     python3 apply_vibration_patches.py <apktool_decompile_dir>
 
-The script is idempotent in failure: if any anchor isn't found it exits
-non-zero before mutating anything else.
+Fails fast: if any anchor isn't found it exits non-zero before mutating
+anything else.
 """
 import sys
 from pathlib import Path
