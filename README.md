@@ -1,5 +1,15 @@
 # GameHub 6.0.1 — Vibration Mod
 
+> **Built on the shoulders of [BannerHub](https://github.com/The412Banner/BannerHub) by [@The412Banner](https://github.com/The412Banner).**
+> The original 5.3.5-based BannerHub project pioneered the apktool-driven
+> patching pipeline, smali injection patterns, libevshim guest-side SDL
+> keepalive, and the entire vibration-mod architecture this fork is built
+> on. If you want the *full* set of GameHub enhancements (Amazon / Epic /
+> GOG store integration, Component Manager, RTS touch controls, HUD
+> overlays, root access management, frontend export, etc.), use BannerHub
+> upstream — that's the real project. This fork is a deliberate strip-down
+> of just the vibration mod onto a 6.0.1 base.
+
 A minimal patch on top of stock GameHub 6.0.1 that adds **PC-accurate XInput
 rumble support** for Wine games. Nothing else is changed.
 
