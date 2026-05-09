@@ -28,10 +28,6 @@ What you get over stock 6.0.1:
   2 s duration so the timer never fires.
 - **Instant release** when the game stops rumble — no phantom-suppression
   timer extending the motor past the actual stop call.
-- **Per-game Mode/Intensity settings** (Off / Controller / Device / Both,
-  0–100 %) via `BhVibrationSettingsActivity`. Settings persist in
-  `pc_g_setting<gameId>` SharedPreferences so they round-trip with stock
-  Export/Import Config.
 
 Multi-controller support and the connect-time wake-up that the 5.3.5 mod
 needed are dropped in this 6.0.1 build — the 6.0.1 gamepad subsystem
