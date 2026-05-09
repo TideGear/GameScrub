@@ -128,12 +128,12 @@ jobs:
           # Sign with the repo's testkey
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/apksigner sign \
               --key testkey.pk8 --cert testkey.x509.pem \
-              --out GameHub-6.0.1-vib.apk \
+              --out GameHub-Vibration-Fix.apk \
               rebuilt-aligned.apk
-          ls -lh GameHub-6.0.1-vib.apk
+          ls -lh GameHub-Vibration-Fix.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GameHub-6.0.1-vib
-          path: GameHub-6.0.1-vib.apk
+          name: GameHub-Vibration-Fix
+          path: GameHub-Vibration-Fix.apk

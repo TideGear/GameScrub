@@ -1,7 +1,9 @@
 /*
- * libevshim.so — guest-side SDL rumble keepalive for BannerHub
+ * libevshim.so — guest-side SDL rumble keepalive for GameHub Vibration Fix
  *
- * Adapted from GameNative PR #1214 (TideGear) for BannerHub's GameHub bridge.
+ * Adapted from GameNative PR #1214 (TideGear) and the original BannerHub
+ * implementation by @The412Banner. Now layered onto GameHub's host bridge
+ * directly without the rest of the BannerHub patch suite.
  *
  * Why:
  *   Wine games' rumble path is: XInput → winebus.so → SDL_JoystickRumble →
@@ -66,7 +68,7 @@ typedef struct SDL_Joystick SDL_Joystick;
 /* Log volume guideline: keep startup output to ~3 lines per Wine
  * subprocess + on-event lines only. High-frequency logging during init
  * (e.g. per-tick polling output) has previously starved Java's
- * processExited() pipe-drainer and tripped BannerHub's startup watchdog,
+ * processExited() pipe-drainer and tripped the host's startup watchdog,
  * resulting in SIGKILL of the whole Wine tree. */
 #define LOG(fmt, ...) __android_log_print(ANDROID_LOG_INFO, "evshim", fmt, ##__VA_ARGS__)
 #define LOGE(fmt, ...) __android_log_print(ANDROID_LOG_ERROR, "evshim", fmt, ##__VA_ARGS__)
@@ -463,7 +465,7 @@ static int patch_winebus_at_base(uintptr_t base)
     return patched > 0;
 }
 
-/* Write a "winedevice ready" marker file so BannerHub Java side knows
+/* Write a "winedevice ready" marker file so the host Java side knows
  * libvfs-client has finished initializing in this winedevice process and
  * is ready to receive GamepadState writes. BhVibrationController watches
  * for this marker (FileObserver) and then fires its synthetic axis-flicker

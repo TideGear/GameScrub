@@ -1,4 +1,4 @@
-# GameHub 6.0.1 — Vibration Mod
+# GameHub Vibration Fix
 
 > **Built on the shoulders of [BannerHub](https://github.com/The412Banner/BannerHub) by [@The412Banner](https://github.com/The412Banner).**
 > The original 5.3.5-based BannerHub project pioneered the apktool-driven
