@@ -77,7 +77,8 @@ scripts/
 - Not a continuation of BannerHub. The Amazon / Epic / GOG / Component
   Manager / RTS touch / etc. patches that BannerHub layered on top of
   GameHub are gone. This fork ships **only the vibration mod**.
-- Not Steam-achievement-aware. Achievements aren't tracked by GameHub's
-  embedded SteamAgent regardless of mod (separate upstream issue).
 - Not a 5.3.5 build. The 5.3.5 vibration port lives on the
-  `Fix-Vibration` branch and is preserved there for reference.
+  `Fix-Vibration` branch and is preserved there for reference. (Stock
+  GameHub 6.0.1's Steam integration handles achievements natively, and
+  our patches don't touch the Steam code paths, so achievements should
+  work in this fork the same as on stock 6.0.1.)
