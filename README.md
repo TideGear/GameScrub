@@ -11,7 +11,9 @@
 > of just the vibration mod onto a 6.0.1 base.
 
 A minimal patch on top of stock GameHub 6.0.1 that adds **PC-accurate XInput
-rumble support** for Wine games. Nothing else is changed.
+rumble support** for Wine games. Nothing else is changed. This is for the
+sake of having the working achievements of stock GameHub plus fixed 
+vibration.
 
 What you get over stock 6.0.1:
 
@@ -87,8 +89,3 @@ scripts/
 - Not a continuation of BannerHub. The Amazon / Epic / GOG / Component
   Manager / RTS touch / etc. patches that BannerHub layered on top of
   GameHub are gone. This fork ships **only the vibration mod**.
-- Not a 5.3.5 build. The 5.3.5 vibration port lives on the
-  `Fix-Vibration` branch and is preserved there for reference. (Stock
-  GameHub 6.0.1's Steam integration handles achievements natively, and
-  our patches don't touch the Steam code paths, so achievements should
-  work in this fork the same as on stock 6.0.1.)
