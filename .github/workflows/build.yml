@@ -1,19 +1,32 @@
 name: Build APK
 
-# GameHub 6.0.1 with PC-accurate XInput rumble — the vibration mod only,
+# GameHub with PC-accurate XInput rumble — the vibration mod only,
 # nothing else. Adds dual-motor low/high dispatch + libevshim sustained
 # rumble keepalive on top of stock GameHub. Otherwise unchanged from
 # upstream Tencent build.
 #
-# Setup once: upload the GameHub 6.0.1 APK as an asset on a release
-# tagged `base-apk-6.0.1` in this repo. The workflow `gh release
-# download`s from there.
+# Supports stock 6.0.1 and 6.0.2 (apply_vibration_patches.py auto-detects
+# the version from the obfuscated class names in the decompiled tree).
+#
+# Setup once per base version: upload the original GameHub APK as an
+# asset on a release tagged `base-apk-<version>` in this repo (e.g.
+# `base-apk-6.0.2`). The workflow `gh release download`s from there.
 
 on:
   push:
     tags:
       - 'v*-6.0.1*'
+      - 'v*-6.0.2*'
   workflow_dispatch:
+    inputs:
+      base_version:
+        description: 'Stock GameHub version to patch (must have a base-apk-<version> release).'
+        required: true
+        default: '6.0.2'
+        type: choice
+        options:
+          - '6.0.2'
+          - '6.0.1'
 
 jobs:
   build:
@@ -25,9 +38,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download original 6.0.1 APK
+      - name: Resolve base version
+        id: base
         run: |
-          gh release download base-apk-6.0.1 --pattern "*.apk" -D base/ -R ${{ github.repository }}
+          # workflow_dispatch → use the chosen input.
+          # tag push        → parse the version out of the tag
+          #                   (e.g. v1.2-6.0.2 → 6.0.2).
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VER="${{ inputs.base_version }}"
+          else
+            REF="${GITHUB_REF#refs/tags/}"
+            VER="$(echo "$REF" | sed -nE 's/.*-(6\.0\.[0-9]+).*/\1/p')"
+          fi
+          if [ -z "$VER" ]; then
+            echo "ERROR: could not resolve base version from event=${{ github.event_name }} ref=${GITHUB_REF}" >&2
+            exit 1
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "release_tag=base-apk-$VER" >> "$GITHUB_OUTPUT"
+          echo "Base version: $VER"
+
+      - name: Download original GameHub APK
+        run: |
+          gh release download "${{ steps.base.outputs.release_tag }}" --pattern "*.apk" -D base/ -R ${{ github.repository }}
           ls base/
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -50,7 +83,7 @@ jobs:
 
       - name: Strip newer-Android manifest attributes apktool 2.9.3 can't reassemble
         run: |
-          # 6.0.1's AndroidManifest uses two attributes whose namespaces aren't in
+          # 6.0.x's AndroidManifest uses two attributes whose namespaces aren't in
           # the framework apktool 2.9.3 ships with. They're cosmetic (BLUETOOTH_SCAN
           # flag + predictive-back opt-in); stripping is harmless for a vibration-mod
           # test build.
@@ -65,11 +98,11 @@ jobs:
           print("manifest stripped")
           PYEOF
 
-      - name: Apply BhVibration smali patches (6.0.1)
+      - name: Apply BhVibration smali patches
         run: |
-          # Path inside apply_vibration_patches.py uses smali_classes3/* and
-          # the obfuscated 6.0.1 class names (g58, sc5, etc.) — see
-          # patches-6.0.1/README.md for the rename map.
+          # apply_vibration_patches.py auto-detects 6.0.1 vs 6.0.2 from the
+          # obfuscated class names present in smali_classes3/. Rename map
+          # lives at the top of that script.
           python3 scripts/apply_vibration_patches.py apktool_out
 
       - name: Build libevshim.so (guest-side SDL keepalive)
@@ -107,7 +140,8 @@ jobs:
           java -jar $HOME/bin/apktool.jar b apktool_out -o rebuilt-unsigned.apk
 
           # Compile vibration extension Java + d8 to classes7.dex
-          # (6.0.1 base APK has 6 dex files; classes7 is the next free slot.)
+          # (6.0.1 and 6.0.2 base APKs both have 6 dex files; classes7 is
+          # the next free slot.)
           ANDROID_JAR=$(ls $ANDROID_SDK_ROOT/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)
           mkdir -p ext_classes
           javac -source 8 -target 8 -cp "$ANDROID_JAR" -d ext_classes \
@@ -126,14 +160,16 @@ jobs:
               rebuilt-unsigned.apk rebuilt-aligned.apk
 
           # Sign with the repo's testkey
+          OUT="GameHub-Vibration-Fix-${{ steps.base.outputs.version }}.apk"
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/apksigner sign \
               --key testkey.pk8 --cert testkey.x509.pem \
-              --out GameHub-Vibration-Fix.apk \
+              --out "$OUT" \
               rebuilt-aligned.apk
-          ls -lh GameHub-Vibration-Fix.apk
+          ls -lh "$OUT"
+          echo "out_apk=$OUT" >> "$GITHUB_ENV"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GameHub-Vibration-Fix
-          path: GameHub-Vibration-Fix.apk
+          name: GameHub-Vibration-Fix-${{ steps.base.outputs.version }}
+          path: ${{ env.out_apk }}

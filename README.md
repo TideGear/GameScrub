@@ -8,18 +8,18 @@
 > GOG store integration, Component Manager, RTS touch controls, HUD
 > overlays, root access management, frontend export, etc.), use BannerHub
 > upstream — that's the real project. This fork is a deliberate strip-down
-> of just the vibration mod onto a 6.0.1 base.
+> of just the vibration mod onto a 6.0.x base.
 
-A minimal patch on top of stock GameHub 6.0.1 that adds **PC-accurate XInput
-rumble support** for Wine games. Nothing else is changed. This is for the
-sake of having the working achievements of stock GameHub plus fixed 
-vibration.
+A minimal patch on top of stock GameHub (6.0.1 or 6.0.2) that adds
+**PC-accurate XInput rumble support** for Wine games. Nothing else is
+changed. This is for the sake of having the working achievements of
+stock GameHub plus fixed vibration.
 
-What you get over stock 6.0.1:
+What you get over stock GameHub:
 
 - **Dual-motor low/high dispatch.** Wine games calling `XInputSetState(slot,
   low, high)` get the two motors driven independently via Android
-  `CombinedVibration.startParallel` on ≥ 2-motor controllers. Stock 6.0.1
+  `CombinedVibration.startParallel` on ≥ 2-motor controllers. Stock GameHub
   blends both motors into a single haptic pulse; this preserves the heavy
   / light distinction the way the game intended.
 - **Sustained rumble holds past 1 s.** SDL2's internal 1 s
@@ -30,19 +30,25 @@ What you get over stock 6.0.1:
   timer extending the motor past the actual stop call.
 
 Multi-controller support and the connect-time wake-up that the 5.3.5 mod
-needed are dropped in this 6.0.1 build — the 6.0.1 gamepad subsystem
-refactor fixed the lazy-attach issue natively.
+needed are dropped in this build — the 6.0.x gamepad subsystem refactor
+fixed the lazy-attach issue natively.
 
 ## Build
 
 CI workflow: `.github/workflows/build.yml` — triggers on `workflow_dispatch`
-or push of a `v*-6.0.1*` tag.
+(pick base version 6.0.1 or 6.0.2) or push of a `v*-6.0.1*` / `v*-6.0.2*`
+tag.
 
-One-time setup: upload the original
-`GameHub_6.0.1_3c8906664cbe65b4c9f3c36eadb5c406.apk` (or whichever 6.0.1
-build you're targeting) as an asset on a release tagged `base-apk-6.0.1`
-in this repo. The workflow runs `gh release download base-apk-6.0.1` to
-fetch it.
+One-time setup per base version: upload the original GameHub APK as an
+asset on a release tagged `base-apk-<version>` in this repo (e.g.
+`base-apk-6.0.2` for `GameHub_6.0.2_e404e8687204521e0aa7963bd49a5a6b.apk`).
+The workflow `gh release download`s the matching base for the version it
+was triggered against.
+
+`scripts/apply_vibration_patches.py` auto-detects the base version from
+the obfuscated class names present in the decompiled tree (`g58`/`sc5`
+for 6.0.1, `za8`/`dg5` for 6.0.2 — full rename map is at the top of the
+script).
 
 The pipeline:
 
@@ -75,7 +81,8 @@ native/evshim/
 
 scripts/
   apply_vibration_patches.py       four smali hooks against a decompiled
-                                   6.0.1 apktool tree.
+                                   apktool tree (6.0.1 or 6.0.2; version
+                                   auto-detected from class names).
 
 .github/workflows/build.yml        CI build pipeline.
 ```
