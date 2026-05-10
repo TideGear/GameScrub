@@ -102,6 +102,40 @@ scripts/
 .github/workflows/build.yml        CI build pipeline.
 ```
 
+## Side-by-side install (multiple versions on one device)
+
+Two APKs with the same package name can't coexist on Android. The
+workflow has an optional `side_by_side` toggle (workflow_dispatch only —
+tag-triggered builds always keep the canonical package) that renames
+the package to `com.xiaoji.egggame.v<digits>` (`.v535`, `.v601`, `.v602`)
+and appends the version to the launcher label so the home-screen icons
+are distinguishable.
+
+Typical use: keep one variant on the canonical package and ship the
+other(s) as side-by-side. For example, to run 6.0.2 and 5.3.5 together:
+
+1. Run the workflow with `base_version=6.0.2`, `side_by_side=false` →
+   `GameHub-Vibration-Fix-6.0.2.apk` (package: `com.xiaoji.egggame`).
+2. Run again with `base_version=5.3.5`, `side_by_side=true` →
+   `GameHub-Vibration-Fix-5.3.5-sbs.apk` (package:
+   `com.xiaoji.egggame.v535`, label: `<app_name> (5.3.5)`).
+
+Caveats:
+
+- **Separate game libraries.** Each package gets its own `/data/data/`
+  directory — Wine containers, installed games, Steam login, save files
+  all duplicate from scratch. There is no clean way to share them
+  between renamed installs.
+- **Tencent SDK risk.** Stock GameHub bundles a number of Tencent /
+  Aliyun / Mob / Bugly SDKs that may bake in the original package name
+  for licensing or anti-tamper. The renamed build *might* refuse to
+  start or crash on first phone-home; works often enough to be worth
+  trying but not guaranteed. 5.3.5 ships more SDKs than 6.0.2 so it's
+  the riskier of the two.
+- **Compose-rendered UI.** 6.0.x's app label suffix lands on the
+  launcher icon, but in-app top bars (Compose `stringResource(...)`)
+  stay unchanged.
+
 ## What this is not
 
 - Not a continuation of BannerHub. The Amazon / Epic / GOG / Component
