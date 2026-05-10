@@ -5,8 +5,8 @@ name: Build APK
 # rumble keepalive on top of stock GameHub. Otherwise unchanged from
 # upstream Tencent build.
 #
-# Supports stock 6.0.1 and 6.0.2 (apply_vibration_patches.py auto-detects
-# the version from the obfuscated class names in the decompiled tree).
+# Supports stock 5.3.5, 6.0.1, and 6.0.2 (apply_vibration_patches.py auto-
+# detects the version from the smali layout of the decompiled tree).
 #
 # Setup once per base version: upload the original GameHub APK as an
 # asset on a release tagged `base-apk-<version>` in this repo (e.g.
@@ -15,6 +15,7 @@ name: Build APK
 on:
   push:
     tags:
+      - 'v*-5.3.5*'
       - 'v*-6.0.1*'
       - 'v*-6.0.2*'
   workflow_dispatch:
@@ -27,6 +28,7 @@ on:
         options:
           - '6.0.2'
           - '6.0.1'
+          - '5.3.5'
 
 jobs:
   build:
@@ -48,7 +50,7 @@ jobs:
             VER="${{ inputs.base_version }}"
           else
             REF="${GITHUB_REF#refs/tags/}"
-            VER="$(echo "$REF" | sed -nE 's/.*-(6\.0\.[0-9]+).*/\1/p')"
+            VER="$(echo "$REF" | sed -nE 's/.*-(5\.3\.5|6\.0\.[0-9]+).*/\1/p')"
           fi
           if [ -z "$VER" ]; then
             echo "ERROR: could not resolve base version from event=${{ github.event_name }} ref=${GITHUB_REF}" >&2
@@ -86,7 +88,8 @@ jobs:
           # 6.0.x's AndroidManifest uses two attributes whose namespaces aren't in
           # the framework apktool 2.9.3 ships with. They're cosmetic (BLUETOOTH_SCAN
           # flag + predictive-back opt-in); stripping is harmless for a vibration-mod
-          # test build.
+          # test build. The regexes are no-ops on 5.3.5 where these attributes don't
+          # exist in the manifest.
           python3 - <<'PYEOF'
           import re
           with open('apktool_out/AndroidManifest.xml', 'r', encoding='utf-8') as f:
@@ -100,9 +103,9 @@ jobs:
 
       - name: Apply BhVibration smali patches
         run: |
-          # apply_vibration_patches.py auto-detects 6.0.1 vs 6.0.2 from the
-          # obfuscated class names present in smali_classes3/. Rename map
-          # lives at the top of that script.
+          # apply_vibration_patches.py auto-detects 5.3.5, 6.0.1, or 6.0.2
+          # from the smali layout of the decompiled tree. Per-version anchor
+          # set + rename maps live at the top of that script.
           python3 scripts/apply_vibration_patches.py apktool_out
 
       - name: Build libevshim.so (guest-side SDL keepalive)
@@ -139,9 +142,10 @@ jobs:
           # Rebuild
           java -jar $HOME/bin/apktool.jar b apktool_out -o rebuilt-unsigned.apk
 
-          # Compile vibration extension Java + d8 to classes7.dex
-          # (6.0.1 and 6.0.2 base APKs both have 6 dex files; classes7 is
-          # the next free slot.)
+          # Compile vibration extension Java + d8 to classes<N>.dex, where
+          # <N> is the next free dex slot after the rebuilt APK's stock dex
+          # files. (6.0.x has 6 stock dex files → classes7; 5.3.5 has 11
+          # stock dex files → classes12.)
           ANDROID_JAR=$(ls $ANDROID_SDK_ROOT/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)
           mkdir -p ext_classes
           javac -source 8 -target 8 -cp "$ANDROID_JAR" -d ext_classes \
@@ -152,8 +156,18 @@ jobs:
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/d8 \
               --release --min-api 26 --output ext_dex \
               $(find ext_classes -name "*.class")
-          cp ext_dex/classes.dex classes7.dex
-          zip -j rebuilt-unsigned.apk classes7.dex
+          MAX_DEX=$(unzip -l rebuilt-unsigned.apk | awk '
+              match($0, /classes([0-9]*)\.dex$/, m) {
+                  n = (m[1] == "" ? 1 : m[1] + 0);
+                  if (n > max) max = n;
+              }
+              END { print max + 0 }
+          ')
+          NEXT_DEX=$((MAX_DEX + 1))
+          DEX_NAME="classes${NEXT_DEX}.dex"
+          echo "Rebuilt APK has ${MAX_DEX} stock dex files; injecting extension as ${DEX_NAME}"
+          cp ext_dex/classes.dex "$DEX_NAME"
+          zip -j rebuilt-unsigned.apk "$DEX_NAME"
 
           # Align
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/zipalign -f -v 4 \

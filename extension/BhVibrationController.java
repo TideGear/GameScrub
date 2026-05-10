@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.media.AudioAttributes;
 import android.os.Build;
 import android.os.CombinedVibration;
+import android.os.FileObserver;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
@@ -15,9 +16,15 @@ import android.os.VibratorManager;
 import android.util.Log;
 import android.view.InputDevice;
 
+import java.io.File;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLongArray;
 
@@ -36,11 +43,12 @@ import java.util.concurrent.atomic.AtomicLongArray;
  *   - onStop(deviceId): stop hook, invoked at the head of g58.f()V (was
  *     GamepadDevice$Physical.g in 5.3.5). Clears the keepalive map so the
  *     keepalive thread doesn't re-arm a controller the game just stopped.
- *
- * 6.0.1 dropped the connect-time wake-up (B0 hook + GamepadState reflection)
- * the 5.3.5 mod needed — the new gamepad subsystem fixes the libvfs lazy
- * SDL_JOYDEVICEADDED issue natively. See the 5.3.5 version of this file for
- * the wake-up implementation should it ever be needed again.
+ *   - scheduleWakeup(serverManager, slot): connect-time wake-up, invoked at
+ *     the head of GamepadManager.B0(GamepadConnectionEvent)V on 5.3.5 only.
+ *     Triggers libvfs's lazy SDL_JOYDEVICEADDED so winebus opens the slot's
+ *     joystick before the user provides input. 6.0.1+ doesn't call this —
+ *     the gamepad-subsystem refactor fixed lazy-attach natively, and the
+ *     5.3.5-only smali patch (GamepadManager.B0) is the only call site.
  *
  * Modes:
  *   0 = Off         — no rumble anywhere
@@ -388,10 +396,36 @@ public final class BhVibrationController {
         }
     }
 
-    // No connect-time wake-up needed for GameHub 6.0.1: the gamepad subsystem
-    // refactor fixed libvfs's lazy SDL_JOYDEVICEADDED issue natively.
-    // (Compare 5.3.5 — see the GamepadManager.B0 hook + scheduleWakeup +
-    // GamepadState.b reflection that the original mod required.)
+    // ─────────────────────────────────────────────────────────────────────────
+    // Smali entry 4 (5.3.5 only): GamepadManager.B0(GamepadConnectionEvent)V.
+    //
+    // When a controller connects, libvfs.so creates a virtual SDL joystick for
+    // the slot but does NOT emit SDL_JOYDEVICEADDED until first input arrives.
+    // winebus.so therefore never calls SDL_JoystickOpen on the slot, and the
+    // game's XInputSetState dispatch ends up writing rumble to a slot winebus
+    // hasn't registered — silent no-op. Multi-controller users see the second
+    // (and Nth) controller's rumble fail until they press any button on it.
+    //
+    // This hook fires once per connect with the GamepadServerManager + slot
+    // available. We queue a wake-up gated on a winedevice readiness marker
+    // written by libevshim; once the marker fires, drainPendingWakeups()
+    // staggers each slot's button-14 press/release through the slot's
+    // GamepadState (200 ms apart, ascending). libvfs's poller sees the
+    // button-byte change → emits SDL_JOYDEVICEADDED → winebus opens the
+    // joystick → rumble dispatch works without user input.
+    //
+    // 6.0.1+ doesn't need this — the 6.0.1 gamepad subsystem refactor fixed
+    // the lazy-attach issue natively, and the 5.3.5 smali patch
+    // (GamepadManager.B0) is the only call site. Reflection-based to avoid
+    // compile-time dependency on Tencent's gamepad classes.
+    // ─────────────────────────────────────────────────────────────────────────
+    public static void scheduleWakeup(Object serverManager, int slot) {
+        try {
+            getInstance().handleScheduleWakeup(serverManager, slot);
+        } catch (Throwable t) {
+            Log.w(TAG, "scheduleWakeup failed", t);
+        }
+    }
 
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -480,6 +514,207 @@ public final class BhVibrationController {
         // when ANY controller stops in a multi-controller session.
         // Supersede AHEAD of stock g()'s per-vibrator cancel.
         stopController(deviceId);
+    }
+
+    /**
+     * Wake up libvfs's lazily-registered virtual joystick by toggling a
+     * button bit in the slot's GamepadState, which triggers libvfs-client
+     * (in winedevice.exe) to emit SDL_JOYDEVICEADDED so winebus.so can
+     * open the joystick before the user provides input.
+     *
+     * Detection-driven, not timing-driven: connects are queued in
+     * pendingWakeups and fired only when libevshim writes the
+     * .bh_winedevice_ready marker file from inside winedevice.exe (after
+     * its winebus GOT patch lands, which by construction is AFTER libvfs-
+     * client has fully initialized its mmap'd shared buffer). A FileObserver
+     * on the marker drains the queue.
+     *
+     * Stimulus is a button-14 press/release (50 ms apart) via
+     * GamepadState.b(int, boolean). Index 14 is the highest the
+     * range check `p1 < 0xf` accepts (storage offset = 12 + index → byte
+     * 26, well past the axis bytes at 0..11) and is unmapped by every
+     * common XInput-targeting game (XInput defines 14 buttons, indices
+     * 0..13). Empirically axis flicker failed for slot >=1 in multi-
+     * controller setups; button flicker works because libvfs's poller
+     * checks button bytes for the lazy-attach trigger.
+     *
+     * All Tencent class access via reflection because GamepadServerManager
+     * and GamepadState aren't on our compile classpath. Field/method names:
+     *   GamepadServerManager.g(int)        → GamepadState
+     *   GamepadState.b(int, boolean)       → write button byte
+     */
+    private static final String READY_MARKER_NAME = ".bh_winedevice_ready";
+
+    private final Map<Integer, Object> pendingWakeups = new ConcurrentHashMap<>();
+    private final AtomicBoolean readinessWatcherStarted = new AtomicBoolean(false);
+    private volatile FileObserver readinessObserver;
+    // Cache reflection lookups — the GamepadServerManager and GamepadState
+    // classes are the same across every wake-up. Volatile so the
+    // benign-race "look up twice" on first cold start is safe.
+    private volatile Method cachedGetStateMethod;
+    private volatile Method cachedWriteButtonMethod;
+
+    private void handleScheduleWakeup(final Object serverManager, final int slot) {
+        if (serverManager == null || slot < 0 || slot >= MAX_SLOTS) {
+            return;
+        }
+        // Resolve the application Context first — without it we can't find
+        // getFilesDir() to register the FileObserver. handleScheduleWakeup
+        // is sometimes the FIRST entry point hit on cold start (before any
+        // rumble dispatch has called ensureContext for us).
+        ensureContext();
+        maybeResolveContainerFromActivityStack();
+
+        ensureReadinessWatcher();
+        pendingWakeups.put(slot, serverManager);
+        Log.i(TAG, "wake-up queued slot=" + slot + " (awaiting winedevice ready marker)");
+
+        // If the marker already exists from an earlier patcher run, the
+        // FileObserver won't fire — drain immediately.
+        File marker = readyMarkerFile();
+        if (marker != null && marker.exists()) {
+            Log.i(TAG, "wake-up: marker already exists, firing immediately");
+            drainPendingWakeups();
+        }
+    }
+
+    private File readyMarkerFile() {
+        Context ctx = appContext;
+        if (ctx == null) return null;
+        File dir = ctx.getFilesDir();
+        if (dir == null) return null;
+        return new File(dir, READY_MARKER_NAME);
+    }
+
+    private void ensureReadinessWatcher() {
+        if (readinessWatcherStarted.get()) return;
+        Context ctx = appContext;
+        if (ctx == null) return;
+        File dir = ctx.getFilesDir();
+        if (dir == null) return;
+        if (!readinessWatcherStarted.compareAndSet(false, true)) return;
+
+        // Delete any stale marker left over from a previous app session.
+        // The marker indicates "winedevice's libvfs is ready" but it's
+        // valid only for the *current* winedevice process. On a fresh
+        // launch, the previous marker is meaningless — if we saw it,
+        // we'd fire the wake-up before the new winedevice's libvfs has
+        // come up. Force evshim's next write to be a fresh CREATE event
+        // we can trust.
+        File staleMarker = new File(dir, READY_MARKER_NAME);
+        if (staleMarker.exists()) {
+            boolean deleted = staleMarker.delete();
+            Log.i(TAG, "deleted stale ready marker (deleted=" + deleted + ")");
+        }
+
+        // Watch CREATE (fresh marker after a winedevice respawn — evshim
+        // unlinks before recreating to guarantee this fires) and MODIFY
+        // (in case the unlink races with FileObserver registration).
+        FileObserver fo = new FileObserver(dir.getAbsolutePath(),
+                FileObserver.CREATE | FileObserver.MODIFY | FileObserver.MOVED_TO) {
+            @Override public void onEvent(int event, String path) {
+                if (path == null) return;
+                if (!READY_MARKER_NAME.equals(path)) return;
+                Log.i(TAG, "winedevice ready marker observed (event=0x" + Integer.toHexString(event) + ")");
+                worker.post(new Runnable() {
+                    @Override public void run() { drainPendingWakeups(); }
+                });
+            }
+        };
+        fo.startWatching();
+        readinessObserver = fo;
+        Log.i(TAG, "readiness watcher started on " + dir.getAbsolutePath());
+    }
+
+    private void drainPendingWakeups() {
+        if (pendingWakeups.isEmpty()) return;
+
+        // Stagger wake-ups across slots in ascending order. With a third
+        // controller in the mix, libvfs's SDL_GameController vs. raw
+        // SDL_Joystick split (the "SDL B / SDL A" distinction Wine joystick
+        // testers expose) seems to depend on lower slots being fully
+        // SDL-registered before higher slots' button events trigger
+        // SDL_JOYDEVICEADDED. Empirically: pressing real buttons on slots
+        // 0+1 also unsticks slot 2's rumble — so slot 2's button-flicker
+        // *did* land in shared memory, libvfs just hadn't started watching
+        // it yet. Firing in ascending order, ~200 ms apart, gives each
+        // slot time to register before the next stimulus arrives.
+        List<Integer> slots = new ArrayList<>(pendingWakeups.keySet());
+        Collections.sort(slots);
+        long delayMs = 0L;
+        for (final int slot : slots) {
+            final Object serverManager = pendingWakeups.get(slot);
+            if (serverManager == null) continue;
+            if (delayMs == 0L) {
+                fireWakeup(serverManager, slot);
+            } else {
+                worker.postDelayed(new Runnable() {
+                    @Override public void run() { fireWakeup(serverManager, slot); }
+                }, delayMs);
+            }
+            delayMs += 200L;
+        }
+        pendingWakeups.clear();
+    }
+
+    private void fireWakeup(Object serverManager, final int slot) {
+        try {
+            Method getState = cachedGetStateMethod;
+            if (getState == null) {
+                getState = serverManager.getClass()
+                        .getDeclaredMethod("g", int.class);
+                getState.setAccessible(true);
+                cachedGetStateMethod = getState;
+            }
+            final Object state = getState.invoke(serverManager, slot);
+            if (state == null) {
+                Log.i(TAG, "wake-up: no GamepadState for slot " + slot);
+                return;
+            }
+            // Wake-up via button-press flicker on a high button index that
+            // no real game maps. Wine's bus_sdl.c process_device_event
+            // *drops* button events on unregistered SDL_JoystickIDs (just
+            // logs a WARN — confirmed reading wine-10.0 source), so a
+            // button event on the SDL queue isn't what wakes things. The
+            // real wake-up comes from libvfs lazily emitting
+            // SDL_JOYDEVICEADDED on first-input. Empirically axis flicker
+            // failed for some slots in multi-controller setups but button
+            // flicker works (libvfs's poller appears to check button
+            // bytes for the lazy-attach trigger).
+            //
+            // Use button index 14 — outermost reachable via GamepadState.b
+            // (range check is `p1 < 0xf`, i.e. < 15) and unmapped by every
+            // XInput game (XInput defines 14 buttons, indices 0..13).
+            // Sequence: press, then release 50 ms later. If the user is
+            // genuinely chording button 14 mid-flicker the natural-input
+            // pipeline overwrites within ~16 ms; net effect is still a
+            // state change libvfs notices.
+            final Method writeButton;
+            Method cached = cachedWriteButtonMethod;
+            if (cached == null) {
+                cached = state.getClass()
+                        .getDeclaredMethod("b", int.class, boolean.class);
+                cached.setAccessible(true);
+                cachedWriteButtonMethod = cached;
+            }
+            writeButton = cached;
+            final int wakeButton = 14;
+            writeButton.invoke(state, wakeButton, true);
+            Log.i(TAG, "wake-up fired slot=" + slot
+                    + " button[" + wakeButton + "] press");
+            worker.postDelayed(new Runnable() {
+                @Override public void run() {
+                    try {
+                        writeButton.invoke(state, wakeButton, false);
+                        Log.i(TAG, "wake-up complete slot=" + slot);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "wake-up release failed slot=" + slot, t);
+                    }
+                }
+            }, 50L);
+        } catch (Throwable t) {
+            Log.w(TAG, "wake-up failed slot=" + slot, t);
+        }
     }
 
     /**
