@@ -133,7 +133,7 @@ jobs:
           # set + rename maps live at the top of that script.
           python3 scripts/apply_vibration_patches.py apktool_out
 
-      - name: Rename package for side-by-side install
+      - name: Rename package for side-by-side install (smali + label)
         if: steps.base.outputs.package_suffix != ''
         env:
           BASE_VER: ${{ steps.base.outputs.version }}
@@ -142,34 +142,31 @@ jobs:
           set -e
           OLD_PKG="com.xiaoji.egggame"
           NEW_PKG="${OLD_PKG}${PKG_SUFFIX}"
-          echo "Renaming $OLD_PKG -> $NEW_PKG"
+          echo "Side-by-side rename: $OLD_PKG -> $NEW_PKG"
 
-          # 1. apktool reassembly: setting renameManifestPackage in apktool.yml
-          # makes apktool b rewrite the manifest's package= attribute and any
-          # provider/permission names that bake in the package as a literal
-          # prefix (FileProvider authorities, custom permissions, sync adapter
-          # authorities, etc.). Component android:name attributes — fully-
-          # qualified class refs that point at smali classes we are NOT
-          # renaming — are correctly left unchanged by apktool's logic.
-          if grep -q "^renameManifestPackage:" apktool_out/apktool.yml; then
-            sed -i "s|^renameManifestPackage:.*|renameManifestPackage: ${NEW_PKG}|" apktool_out/apktool.yml
-          else
-            echo "renameManifestPackage: ${NEW_PKG}" >> apktool_out/apktool.yml
-          fi
+          # The manifest rename itself is done by the rebuild step via
+          # apktool b --rename-manifest-package, which is apktool's
+          # documented and tested entry point — it rewrites the manifest's
+          # package=, FileProvider authorities, and custom permission/
+          # authority strings while leaving component android:name class
+          # refs alone. (Earlier attempt edited apktool.yml's
+          # renameManifestPackage key directly, but that key is nested under
+          # packageInfo: and silently no-ops if appended at top level — so
+          # apktool ignored it and the build shipped with the canonical
+          # package.) This step covers the supplementary cleanup that
+          # apktool's flag does not touch:
 
-          # 2. smali: rewrite hardcoded package-name string literals. This is
-          # what BuildConfig.APPLICATION_ID and any SDK init that bakes in a
-          # getPackageName() comparison value compile down to. The trailing-
-          # quote bound is critical: it matches the bare package literal
-          # "com.xiaoji.egggame" but leaves longer strings such as
-          # "com.xiaoji.egggame.MainActivity" untouched (those are class refs
-          # that must stay pointing at the unrenamed smali classes).
+          # 1. smali const-string rewrite (BuildConfig.APPLICATION_ID inlines
+          # and any SDK init that bakes in a getPackageName() comparison).
+          # Trailing-quote bound prevents clobbering longer strings such as
+          # "com.xiaoji.egggame.MainActivity" — those are class refs that
+          # must stay pointing at the unrenamed smali tree.
           grep -rl "\"${OLD_PKG}\"" apktool_out/smali* 2>/dev/null \
             | xargs -r sed -i "s|\"${OLD_PKG}\"|\"${NEW_PKG}\"|g" || true
 
-          # 3. App label suffix: append the version so home-screen icons are
+          # 2. App label suffix: append the version so home-screen icons are
           # distinguishable when both variants are installed. Best-effort —
-          # 6.0.x's UI is mostly Compose-resourced so only the launcher
+          # 6.0.x's UI is mostly Compose-resourced, so only the launcher
           # Activity's android:label="@string/app_name" reflects this; the
           # Compose-rendered top bar inside the app stays unchanged.
           if [ -f apktool_out/res/values/strings.xml ]; then
@@ -177,7 +174,7 @@ jobs:
               apktool_out/res/values/strings.xml
           fi
 
-          echo "Package rename complete: package=${NEW_PKG}, label suffix=(${BASE_VER})"
+          echo "Side-by-side prep complete: smali rewritten, label suffix=(${BASE_VER})"
 
       - name: Build libevshim.so (guest-side SDL keepalive)
         run: |
@@ -207,11 +204,22 @@ jobs:
           file apktool_out/lib/arm64-v8a/libevshim.so
 
       - name: Rebuild and sign
+        env:
+          PKG_SUFFIX: ${{ steps.base.outputs.package_suffix }}
         run: |
           set -e
 
-          # Rebuild
-          java -jar $HOME/bin/apktool.jar b apktool_out -o rebuilt-unsigned.apk
+          # Rebuild — when building for side-by-side install, hand apktool the
+          # new package via --rename-manifest-package. apktool rewrites the
+          # manifest's package= attribute plus all FileProvider authorities
+          # and custom permission strings that prefix the package as a
+          # literal, while leaving component android:name class refs alone.
+          RENAME_FLAG=()
+          if [ -n "$PKG_SUFFIX" ]; then
+            RENAME_FLAG=(--rename-manifest-package "com.xiaoji.egggame${PKG_SUFFIX}")
+            echo "Rebuilding with renamed package: com.xiaoji.egggame${PKG_SUFFIX}"
+          fi
+          java -jar $HOME/bin/apktool.jar b apktool_out -o rebuilt-unsigned.apk "${RENAME_FLAG[@]}"
 
           # Compile vibration extension Java + d8 to classes<N>.dex, where
           # <N> is the next free dex slot after the rebuilt APK's stock dex
