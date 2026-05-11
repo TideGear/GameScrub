@@ -555,7 +555,19 @@ static int proc_needs_sdl(void)
     char cmd[256];
     read_self_cmdline(cmd, sizeof(cmd));
     /* Process-name suffixes we know don't use SDL — match case-insensitively
-     * since Windows-side paths can be either. */
+     * since Windows-side paths can be either.
+     *
+     * Steam-side daemons added after a reported hang: steamservice.exe
+     * (cloud-sync helper) and steamwebhelper.exe (Steam overlay browser
+     * process) are PE images Steam spawns that don't use SDL. Without
+     * this, our preload_sdl_global() force-loads libSDL2-2.0.so into
+     * them, which either trips SDL's static init in a context with no
+     * audio/video/input device available (abort) or collides with
+     * Steam's bundled SDL. steamservice.exe dying leaves Steam waiting
+     * forever for cloud sync, hanging every game launch at "Initializing".
+     *
+     * conhost.exe / cmd.exe / rundll32.exe are common Wine helper PE
+     * shells; added defensively. */
     static const char * const skip_markers[] = {
         "wineserver",
         "services.exe",
@@ -564,6 +576,11 @@ static int proc_needs_sdl(void)
         "explorer.exe",
         "rpcss.exe",
         "tabtip.exe",
+        "steamservice.exe",
+        "steamwebhelper.exe",
+        "conhost.exe",
+        "cmd.exe",
+        "rundll32.exe",
         "/jwm ",
         "/jwm",
         NULL,
