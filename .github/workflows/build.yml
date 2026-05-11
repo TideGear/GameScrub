@@ -144,48 +144,163 @@ jobs:
           NEW_PKG="${OLD_PKG}${PKG_SUFFIX}"
           echo "Side-by-side rename: $OLD_PKG -> $NEW_PKG"
 
-          # 1. apktool.yml: set packageInfo.renameManifestPackage. apktool b
-          # reads this at rebuild and tells aapt2 to rewrite the manifest's
-          # package= attribute. The key is NESTED under packageInfo: with
-          # two-space indent — the earlier top-level edit was silently a
-          # no-op. apktool 2.9.3 does not expose a --rename-manifest-package
-          # CLI flag (removed after 2.6.x in favour of the yml setting).
+          # 1. apktool.yml: set packageInfo.renameManifestPackage so apktool b
+          # tells aapt2 to rewrite the <manifest package="..."> attribute on
+          # rebuild. The key is NESTED under packageInfo: with two-space
+          # indent — a top-level append silently no-ops. apktool 2.9.3 has
+          # no --rename-manifest-package CLI flag (removed after 2.6.x in
+          # favour of the yml setting).
           if grep -qE "^[[:space:]]+renameManifestPackage:" apktool_out/apktool.yml; then
             sed -i -E "s|^([[:space:]]+)renameManifestPackage:.*|\1renameManifestPackage: ${NEW_PKG}|" apktool_out/apktool.yml
           else
-            # Fallback: append under packageInfo: if the key is missing.
             sed -i "/^packageInfo:/a\\  renameManifestPackage: ${NEW_PKG}" apktool_out/apktool.yml
           fi
           echo "apktool.yml packageInfo block:"
           grep -A2 "^packageInfo:" apktool_out/apktool.yml
+          echo ""
 
-          # 2. aapt2's --rename-manifest-package logic (which apktool defers
-          # to) only updates the <manifest package="..."> attribute — it
-          # does NOT rewrite FileProvider authorities, custom permission
-          # names, or other strings that bake in the old package as a
-          # literal prefix. Those would collide with whatever other GameHub
-          # variant is already installed on the device (authorities are
-          # globally unique across all installed apps; collision => install
-          # rejected by PackageManager).
+          # 2. aapt2's renameManifestPackage logic only updates the
+          # <manifest package="..."> attribute — FileProvider authorities,
+          # custom permission names, and android:targetPackage that bake
+          # the package as a literal prefix stay pointing at the old
+          # value. Two consequences if we don't rewrite them ourselves:
           #
-          # Sed-rewrite those manifest strings explicitly. We deliberately
-          # don't blanket-replace the package literal across the whole
-          # manifest because some absolute android:name="<old-pkg>.X"
-          # component refs (notably on 6.0.x: AndroidApp, MainActivity)
-          # must keep pointing at the unrenamed smali classes.
-          M=apktool_out/AndroidManifest.xml
-          sed -i -E "s|android:authorities=\"${OLD_PKG}|android:authorities=\"${NEW_PKG}|g" "$M"
-          sed -i -E "s|android:name=\"${OLD_PKG}\.permission\.|android:name=\"${NEW_PKG}.permission.|g" "$M"
-          sed -i -E "s|android:permission=\"${OLD_PKG}\.permission\.|android:permission=\"${NEW_PKG}.permission.|g" "$M"
-          sed -i -E "s|android:targetPackage=\"${OLD_PKG}\"|android:targetPackage=\"${NEW_PKG}\"|g" "$M"
+          #   a) Authority collision with the canonical install. Android
+          #      enforces global uniqueness of provider authorities; when
+          #      both variants are installed, only ONE keeps the authority
+          #      (usually the first-installed) and the other's calls into
+          #      its own provider go to the wrong app's data.
+          #   b) Custom permissions declared under the old package can
+          #      similarly only be declared by one app — second-installer
+          #      silently loses its permission grants, causing odd
+          #      runtime IPC failures (e.g. Steam-launcher status pipes,
+          #      FCM/pushcore service binds).
+          #
+          # Use Python to walk the manifest XML attributes explicitly:
+          #   - android:authorities  → rename when prefixed with OLD_PKG
+          #   - android:name         → rename ONLY for <permission> and
+          #                            <uses-permission> elements (these
+          #                            are permission names, not class
+          #                            refs); leave component android:name
+          #                            on <activity>/<service>/<provider>/
+          #                            <receiver> alone — those are FQ
+          #                            class refs pointing at smali we
+          #                            are NOT renaming.
+          #   - android:permission   → rename when prefixed with OLD_PKG
+          #   - android:targetPackage → rename when equal to OLD_PKG
+          #
+          # Apktool's text manifest is whitespace-sensitive (apktool
+          # reuses formatting during reassembly), so the rewriter does
+          # targeted regex on each attribute rather than full XML parse+
+          # serialize which would normalise whitespace and risk apktool
+          # reassembly errors.
+          python3 - <<PYEOF
+          import re, sys
+          OLD = "${OLD_PKG}"
+          NEW = "${NEW_PKG}"
+          path = "apktool_out/AndroidManifest.xml"
+          with open(path, encoding="utf-8") as f:
+              content = f.read()
+
+          changes = {"authorities": 0, "perm_decl": 0, "perm_use": 0, "perm_ref": 0, "target_pkg": 0}
+
+          # 2a. Provider authorities. Accept any authority whose value
+          # contains the old package as a substring (handles both prefix
+          # form like "OLD.foo" AND the rarer suffix/embedded form like
+          # "poster.OLD" observed in stock 5.3.5).
+          def rewrite_authorities(m):
+              val = m.group(1)
+              # Authorities can be a list ";"-separated.
+              parts = val.split(";")
+              new_parts = []
+              for p in parts:
+                  if OLD in p:
+                      new_p = p.replace(OLD, NEW)
+                      if new_p != p:
+                          changes["authorities"] += 1
+                      new_parts.append(new_p)
+                  else:
+                      new_parts.append(p)
+              return 'android:authorities="' + ";".join(new_parts) + '"'
+
+          content = re.sub(r'android:authorities="([^"]*)"', rewrite_authorities, content)
+
+          # 2b. Permission declarations (<permission android:name="OLD.permission.X" .../>)
+          # and uses (<uses-permission android:name="OLD.permission.X"/>).
+          # Restrict to element tags <permission> and <uses-permission>
+          # so we don't touch component android:name attributes on
+          # <activity>/<service>/<provider>/<receiver>.
+          def rewrite_perm_decl(m):
+              tag, before, name, after = m.group(1), m.group(2), m.group(3), m.group(4)
+              if name.startswith(OLD + ".") or name == OLD:
+                  changes["perm_decl" if tag == "permission" else "perm_use"] += 1
+                  return f'<{tag}{before}android:name="{NEW + name[len(OLD):]}"{after}'
+              return m.group(0)
+
+          content = re.sub(
+              r'<(permission|uses-permission)([^>]*?)android:name="([^"]*)"([^>]*)',
+              rewrite_perm_decl, content
+          )
+
+          # 2c. android:permission="..." attribute references on any element.
+          def rewrite_perm_ref(m):
+              val = m.group(1)
+              if val.startswith(OLD + ".") or val == OLD:
+                  changes["perm_ref"] += 1
+                  return f'android:permission="{NEW + val[len(OLD):]}"'
+              return m.group(0)
+
+          content = re.sub(r'android:permission="([^"]*)"', rewrite_perm_ref, content)
+
+          # 2d. android:targetPackage (instrumentation).
+          def rewrite_target(m):
+              if m.group(1) == OLD:
+                  changes["target_pkg"] += 1
+                  return f'android:targetPackage="{NEW}"'
+              return m.group(0)
+
+          content = re.sub(r'android:targetPackage="([^"]*)"', rewrite_target, content)
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+
+          print(f"Manifest rewrites: {changes}")
+          if sum(changes.values()) == 0:
+              print("WARNING: no manifest attributes were rewritten. This is unusual unless stock GameHub has zero package-prefixed authorities/permissions.", file=sys.stderr)
+          PYEOF
+
+          # 2e. Verification: dump every authorities/permission value left
+          # in the manifest after rewriting, so CI logs show exactly what
+          # the final APK will declare. If anything still references the
+          # OLD package, the install will collide with the canonical app.
+          echo ""
+          echo "Manifest authorities after rewrite:"
+          grep -oE 'android:authorities="[^"]*"' apktool_out/AndroidManifest.xml | sort -u | sed 's/^/  /'
+          echo "Manifest permission names after rewrite:"
+          grep -oE '<(uses-)?permission[^>]*android:name="[^"]*"' apktool_out/AndroidManifest.xml | grep -oE 'android:name="[^"]*"' | sort -u | sed 's/^/  /'
+          echo ""
+          if grep -qE 'android:authorities="'"${OLD_PKG}"'($|[^.]|\.)' apktool_out/AndroidManifest.xml; then
+            # Authority still starts with old pkg AND is not part of a longer pkg name like com.xiaoji.egggames
+            REMAINING=$(grep -oE 'android:authorities="'"${OLD_PKG}"'[^"]*"' apktool_out/AndroidManifest.xml | sort -u || true)
+            if [ -n "$REMAINING" ]; then
+              echo "ERROR: authorities still pointing at $OLD_PKG after rewrite:" >&2
+              echo "$REMAINING" >&2
+              exit 1
+            fi
+          fi
 
           # 3. smali const-string rewrite (BuildConfig.APPLICATION_ID inlines
           # and any SDK init that bakes in a getPackageName() comparison).
           # Trailing-quote bound prevents clobbering longer strings such as
           # "com.xiaoji.egggame.MainActivity" — those are class refs that
           # must stay pointing at the unrenamed smali tree.
-          grep -rl "\"${OLD_PKG}\"" apktool_out/smali* 2>/dev/null \
-            | xargs -r sed -i "s|\"${OLD_PKG}\"|\"${NEW_PKG}\"|g" || true
+          SMALI_HITS=$(grep -rl "\"${OLD_PKG}\"" apktool_out/smali* 2>/dev/null | wc -l)
+          echo "smali files containing bare \"${OLD_PKG}\" literal: ${SMALI_HITS}"
+          if [ "$SMALI_HITS" -gt 0 ]; then
+            grep -rl "\"${OLD_PKG}\"" apktool_out/smali* 2>/dev/null \
+              | xargs sed -i "s|\"${OLD_PKG}\"|\"${NEW_PKG}\"|g"
+            echo "smali bare-literal rewrite applied to ${SMALI_HITS} file(s)"
+          fi
 
           # 4. App label suffix: append the version so home-screen icons are
           # distinguishable when both variants are installed. Best-effort —
@@ -195,8 +310,10 @@ jobs:
           if [ -f apktool_out/res/values/strings.xml ]; then
             sed -i -E "s|(<string name=\"app_name\">)([^<]*)(</string>)|\1\2 (${BASE_VER})\3|" \
               apktool_out/res/values/strings.xml
+            echo "app_name label suffixed with (${BASE_VER})"
           fi
 
+          echo ""
           echo "Side-by-side prep complete."
 
       - name: Build libevshim.so (guest-side SDL keepalive)
