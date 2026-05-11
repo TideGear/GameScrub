@@ -271,23 +271,39 @@ jobs:
 
           # 2e. Verification: dump every authorities/permission value left
           # in the manifest after rewriting, so CI logs show exactly what
-          # the final APK will declare. If anything still references the
-          # OLD package, the install will collide with the canonical app.
+          # the final APK will declare. Verify in Python (exact string
+          # compare on parsed values) — bash regex on the raw text fails
+          # because the dots in com.xiaoji.egggame are regex metacharacters,
+          # so a substring like "com.xiaoji.egggame.v535.X" trivially also
+          # matches "com.xiaoji.egggame.X" patterns.
           echo ""
           echo "Manifest authorities after rewrite:"
           grep -oE 'android:authorities="[^"]*"' apktool_out/AndroidManifest.xml | sort -u | sed 's/^/  /'
           echo "Manifest permission names after rewrite:"
           grep -oE '<(uses-)?permission[^>]*android:name="[^"]*"' apktool_out/AndroidManifest.xml | grep -oE 'android:name="[^"]*"' | sort -u | sed 's/^/  /'
           echo ""
-          if grep -qE 'android:authorities="'"${OLD_PKG}"'($|[^.]|\.)' apktool_out/AndroidManifest.xml; then
-            # Authority still starts with old pkg AND is not part of a longer pkg name like com.xiaoji.egggames
-            REMAINING=$(grep -oE 'android:authorities="'"${OLD_PKG}"'[^"]*"' apktool_out/AndroidManifest.xml | sort -u || true)
-            if [ -n "$REMAINING" ]; then
-              echo "ERROR: authorities still pointing at $OLD_PKG after rewrite:" >&2
-              echo "$REMAINING" >&2
-              exit 1
-            fi
-          fi
+          python3 - <<PYEOF
+          import re, sys
+          OLD = "${OLD_PKG}"
+          NEW = "${NEW_PKG}"
+          with open("apktool_out/AndroidManifest.xml", encoding="utf-8") as f:
+              content = f.read()
+          stale = []
+          for m in re.finditer(r'android:authorities="([^"]*)"', content):
+              for auth in m.group(1).split(";"):
+                  # An authority is "stale" if it contains the OLD package
+                  # as a token but NOT the NEW package. Exact-string check
+                  # — split by '.' so "com.xiaoji.egggame.v535.X" doesn't
+                  # match OLD as a "prefix".
+                  if OLD in auth and NEW not in auth:
+                      stale.append(auth)
+          if stale:
+              print(f"ERROR: authorities still reference {OLD} after rewrite:", file=sys.stderr)
+              for a in sorted(set(stale)):
+                  print(f"  {a}", file=sys.stderr)
+              sys.exit(1)
+          print("Authority rewrite verification: OK")
+          PYEOF
 
           # 3. smali const-string rewrite (BuildConfig.APPLICATION_ID inlines
           # and any SDK init that bakes in a getPackageName() comparison).
