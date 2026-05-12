@@ -141,9 +141,6 @@ def detect_version(root: Path) -> str:
     if (root / "smali_classes3/za8.smali").is_file() \
             and (root / "smali_classes3/dg5.smali").is_file():
         return "6.0.2"
-    if (root / "smali_classes3/g58.smali").is_file() \
-            and (root / "smali_classes3/sc5.smali").is_file():
-        return "6.0.1"
     if (root / "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali").is_file():
         return "5.3.5"
     return "unknown"
@@ -152,12 +149,11 @@ def detect_version(root: Path) -> str:
 def find_auth_combiner_6x(root: Path) -> Path:
     """Scan smali_classes4 for the single auth-state combiner lambda.
 
-    The class is in smali_classes4 on both 6.0.1 and 6.0.2 (it's
-    co-located with the auth state holder `it0`/equivalent in stock
-    Tencent's R8 output). Walking only classes4 keeps the scan fast
-    and avoids matching unrelated 2-arg combine lambdas elsewhere
-    (image-loading combines, etc., that happen to share the L$0+L$1
-    field layout).
+    The class is in smali_classes4 on stock 6.0.2 (it's co-located with
+    the auth state holder `it0` in stock Tencent's R8 output). Walking
+    only classes4 keeps the scan fast and avoids matching unrelated
+    2-arg combine lambdas elsewhere (image-loading combines, etc., that
+    happen to share the L$0+L$1 field layout).
     """
     candidates = []
     classes4 = root / "smali_classes4"
@@ -385,7 +381,7 @@ def main():
 
     version = detect_version(root)
     print(f"Detected GameHub base version: {version}")
-    if version in ("6.0.1", "6.0.2"):
+    if version == "6.0.2":
         patch_6x(root)
         patch_6x_privacy(root)
     elif version == "5.3.5":

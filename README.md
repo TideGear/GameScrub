@@ -8,10 +8,9 @@
 > GOG store integration, Component Manager, RTS touch controls, HUD
 > overlays, root access management, frontend export, etc.), use BannerHub
 > upstream — that's the real project. This fork is a deliberate strip-down
-> of just the vibration mod, supporting stock 5.3.5, 6.0.1, and 6.0.2 base
-> APKs.
+> of just the vibration mod, supporting stock 5.3.5 and 6.0.2 base APKs.
 
-A minimal patch on top of stock GameHub (5.3.5, 6.0.1, or 6.0.2) that
+A minimal patch on top of stock GameHub (5.3.5 or 6.0.2) that
 adds **PC-accurate XInput rumble support** for Wine games. Nothing else
 is changed. This is for the sake of having the working achievements of
 stock GameHub plus fixed vibration.
@@ -33,14 +32,14 @@ What you get over stock GameHub:
   button-14 flicker on each newly-connected slot's `GamepadState` so
   libvfs's lazy `SDL_JOYDEVICEADDED` lands before the user provides input.
   Without it, the second/Nth controller's rumble silently no-ops on 5.3.5
-  until you press a button. 6.0.1+ doesn't need this — the gamepad-
-  subsystem refactor in 6.0.1 fixed lazy-attach natively.
+  until you press a button. 6.0.2 doesn't need this — the gamepad-
+  subsystem refactor in the 6.0 line fixed lazy-attach natively.
 
 ## Build
 
 CI workflow: `.github/workflows/build.yml` — triggers on `workflow_dispatch`
-(pick base version 5.3.5, 6.0.1, or 6.0.2) or push of a `v*-5.3.5*` /
-`v*-6.0.1*` / `v*-6.0.2*` tag.
+(pick base version 5.3.5 or 6.0.2) or push of a `v*-5.3.5*` /
+`v*-6.0.2*` tag.
 
 One-time setup per base version: upload the original GameHub APK as an
 asset on a release tagged `base-apk-<version>` in this repo (e.g.
@@ -53,9 +52,8 @@ the smali layout of the decompiled tree:
 
 - **5.3.5** ships unobfuscated symbols — anchors live under
   `smali_classes7/com/winemu/core/{controller,gamepad}/`.
-- **6.0.1** uses ProGuard names `g58` (Physical), `sc5` (env builder),
-  `gr2.B0` (joinToString helper).
-- **6.0.2** renames those to `za8`, `dg5`, `ns2.I0` respectively.
+- **6.0.2** uses ProGuard names `za8` (Physical), `dg5` (env builder),
+  `ns2.I0` (joinToString helper).
 
 Full rename map and per-version anchor set are at the top of the script.
 
@@ -64,14 +62,14 @@ The pipeline:
 1. `apktool d` the base APK
 2. Strip `android:usesPermissionFlags` and
    `android:enableOnBackInvokedCallback` from the manifest (apktool 2.9.3's
-   bundled aapt2 doesn't know them; cosmetic, harmless on 6.0.x — no-op
+   bundled aapt2 doesn't know them; cosmetic, harmless on 6.0.2 — no-op
    on 5.3.5 where these attributes don't exist)
 3. `python3 scripts/apply_vibration_patches.py` — four smali hooks on
-   6.0.x, five on 5.3.5 (extra connect-time wake-up)
+   6.0.2, five on 5.3.5 (extra connect-time wake-up)
 4. `cmake/ninja` build of `native/evshim/libevshim.so` for arm64-v8a
 5. `apktool b`
 6. `javac + d8` of the two `extension/Bh*.java` files → next free
-   `classesN.dex` slot (classes7 on 6.0.x, classes12 on 5.3.5), inject
+   `classesN.dex` slot (classes7 on 6.0.2, classes12 on 5.3.5), inject
    into the APK
 7. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
 8. Upload as `GameHub-Vibration-Fix-<version>.apk`
@@ -96,7 +94,7 @@ native/evshim/
 
 scripts/
   apply_vibration_patches.py       smali hooks against a decompiled
-                                   apktool tree (5.3.5, 6.0.1, or 6.0.2;
+                                   apktool tree (5.3.5 or 6.0.2;
                                    version auto-detected from layout).
 
 .github/workflows/build.yml        CI build pipeline.

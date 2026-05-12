@@ -5,8 +5,8 @@ name: Build APK
 # rumble keepalive on top of stock GameHub. Otherwise unchanged from
 # upstream Tencent build.
 #
-# Supports stock 5.3.5, 6.0.1, and 6.0.2 (apply_vibration_patches.py auto-
-# detects the version from the smali layout of the decompiled tree).
+# Supports stock 5.3.5 and 6.0.2 (apply_vibration_patches.py auto-detects
+# the version from the smali layout of the decompiled tree).
 #
 # Setup once per base version: upload the original GameHub APK as an
 # asset on a release tagged `base-apk-<version>` in this repo (e.g.
@@ -16,7 +16,6 @@ on:
   push:
     tags:
       - 'v*-5.3.5*'
-      - 'v*-6.0.1*'
       - 'v*-6.0.2*'
   workflow_dispatch:
     inputs:
@@ -27,7 +26,6 @@ on:
         type: choice
         options:
           - '6.0.2'
-          - '6.0.1'
           - '5.3.5'
       bypass_login:
         description: 'Bypass the GameHub login screen (and inline privacy footer). 6.0.2 only — 5.3.5 not yet supported.'
@@ -55,7 +53,7 @@ jobs:
             VER="${{ inputs.base_version }}"
           else
             REF="${GITHUB_REF#refs/tags/}"
-            VER="$(echo "$REF" | sed -nE 's/.*-(5\.3\.5|6\.0\.[0-9]+).*/\1/p')"
+            VER="$(echo "$REF" | sed -nE 's/.*-(5\.3\.5|6\.0\.2).*/\1/p')"
           fi
           if [ -z "$VER" ]; then
             echo "ERROR: could not resolve base version from event=${{ github.event_name }} ref=${GITHUB_REF}" >&2
@@ -108,8 +106,8 @@ jobs:
 
       - name: Apply BhVibration smali patches
         run: |
-          # apply_vibration_patches.py auto-detects 5.3.5, 6.0.1, or 6.0.2
-          # from the smali layout of the decompiled tree. Per-version anchor
+          # apply_vibration_patches.py auto-detects 5.3.5 or 6.0.2 from
+          # the smali layout of the decompiled tree. Per-version anchor
           # set + rename maps live at the top of that script.
           python3 scripts/apply_vibration_patches.py apktool_out
 

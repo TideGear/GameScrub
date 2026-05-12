@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
 Apply PC-accurate vibration patches to a decompiled GameHub apktool tree.
-Supports stock 5.3.5, 6.0.1, and 6.0.2 — version is auto-detected from
-the smali class layout.
+Supports stock 5.3.5 and 6.0.2 — version is auto-detected from the smali
+class layout.
 
-Hooks (5.3.5 has one extra; 6.0.x dropped it because the gamepad subsystem
-refactor in 6.0.1 fixed the underlying lazy-attach issue natively):
+Hooks (5.3.5 has one extra; 6.0.2 dropped it because the gamepad subsystem
+refactor in the 6.0 line fixed the underlying lazy-attach issue natively):
 
   1. GamepadServerManager.onRumble(III)V  — entry hook for the dispatcher
   2. <Physical>.<dispatch>(II)V            — per-controller rumble dispatch
-                                             (h(II)V in 5.3.5; g(II)V in 6.0.x)
+                                             (h(II)V in 5.3.5; g(II)V in 6.0.2)
   3. <Physical>.<stop>()V                  — stop hook for keepalive cleanup
-                                             (g()V in 5.3.5; f()V in 6.0.x)
+                                             (g()V in 5.3.5; f()V in 6.0.2)
   4. <EnvBuilder>.smali LD_PRELOAD path    — prepend libevshim.so for SDL
                                              1 s auto-expiry keepalive
   5. GamepadManager.B0(...)V (5.3.5 only)  — connect-time wake-up so libvfs
@@ -19,18 +19,10 @@ refactor in 6.0.1 fixed the underlying lazy-attach issue natively):
                                              before the user touches it
                                              (multi-controller fix)
 
-5.3.5 ships unobfuscated symbols; 6.0.x renames are summarised below for
-when those anchors need updating against a future stock release.
+5.3.5 ships unobfuscated symbols; 6.0.2's ProGuard renames are baked into
+RENAMES_6X below.
 
-  6.0.1 → 6.0.2 ProGuard rename map:
-    g58 → za8       (Physical class with f:I deviceId field)
-    pfl → lrl       (type of the .k field on Physical)
-    sc5 → dg5       (LD_PRELOAD/EnvVars builder)
-    gr2 → ns2       (CollectionsKt joinTo helper class)
-    gr2.B0 → ns2.I0 (joinToString$default)
-    xs6 → ow6       (Function1 lambda type used in joinToString)
-
-Per-game settings UI insertion is intentionally out of scope (the 6.0.x
+Per-game settings UI insertion is intentionally out of scope (the 6.0.2
 popup-menu architecture differs from 5.3.5; BannerHub upstream has the
 5.3.5 version of that). Global mode/intensity work fine via
 BhVibrationSettingsActivity launched directly.
@@ -73,10 +65,6 @@ VERSION_PROBES = {
         "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali",
         "smali_classes7/com/winemu/core/controller/EnvironmentController.smali",
     ),
-    "6.0.1": (
-        "smali_classes3/g58.smali",
-        "smali_classes3/sc5.smali",
-    ),
     "6.0.2": (
         "smali_classes3/za8.smali",
         "smali_classes3/dg5.smali",
@@ -118,23 +106,18 @@ def detect_version(root: Path) -> str:
 # ---------------------------------------------------------------------------
 
 # Rename maps for the 6.0.x family; same structural patches with the
-# obfuscated names swapped in.
+# obfuscated names swapped in. Currently only 6.0.2 is supported — earlier
+# 6.0.x builds (6.0.1) had a different rename set and are no longer
+# tracked. To re-enable, add a probe pair to VERSION_PROBES + an entry
+# here with the correct obfuscated class names.
 RENAMES_6X = {
-    "6.0.1": {
-        "physical": "g58",     # GamepadDevice$Physical-equivalent class
-        "physical_k": "pfl",   # type of <Physical>.k field
-        "envbuilder": "sc5",   # LD_PRELOAD env-builder class
-        "join_cls": "gr2",     # CollectionsKt joinTo helper
-        "join_method": "B0",   # joinToString$default
-        "join_lambda": "xs6",  # Function1 lambda parameter type
-    },
     "6.0.2": {
-        "physical": "za8",
-        "physical_k": "lrl",
-        "envbuilder": "dg5",
-        "join_cls": "ns2",
-        "join_method": "I0",
-        "join_lambda": "ow6",
+        "physical": "za8",     # GamepadDevice$Physical-equivalent class
+        "physical_k": "lrl",   # type of <Physical>.k field
+        "envbuilder": "dg5",   # LD_PRELOAD env-builder class
+        "join_cls": "ns2",     # CollectionsKt joinTo helper
+        "join_method": "I0",   # joinToString$default
+        "join_lambda": "ow6",  # Function1 lambda parameter type
     },
 }
 
@@ -153,9 +136,8 @@ def apply_6x(root: Path, version: str) -> None:
     print()
 
     # Patch 1: GamepadServerManager.onRumble(III)V — short-circuit hook.
-    # Anchor is the method header + the first if-ltz guard. 6.0.0 used
-    # :cond_0 here; 6.0.1 and 6.0.2 both use :cond_4. Identical bytes
-    # between 6.0.1 and 6.0.2.
+    # Anchor is the method header + the first if-ltz guard. 6.0.2 uses
+    # :cond_4 here (earlier 6.0.x builds used :cond_0).
     patch(
         root / "smali_classes3/com/winemu/core/gamepad/GamepadServerManager.smali",
         ".method private final onRumble(III)V\n"
@@ -336,7 +318,7 @@ def apply_6x(root: Path, version: str) -> None:
 # EnvironmentController class (no joinToString helper — uses a List directly,
 # so the inject site is right before EnvVars.f("LD_PRELOAD", v1)). And there
 # is one extra hook (GamepadManager.B0) to wake libvfs's lazy SDL joystick
-# registration on each controller-connect, which 6.0.1+ fixed natively.
+# registration on each controller-connect, which the 6.0 line fixed natively.
 
 def apply_535(root: Path) -> None:
     print("  Layout:           smali_classes7/com/winemu/core/{controller,gamepad}/")
@@ -490,7 +472,7 @@ def apply_535(root: Path) -> None:
     # crashing WineActivity later with "Virtual gamepad enabled but no
     # controller found".
     #
-    # 6.0.1+ doesn't need this — the 6.0.1 gamepad-subsystem refactor fixed
+    # 6.0.x doesn't need this — the 6.0 gamepad-subsystem refactor fixed
     # the lazy-attach issue natively, so this patch is 5.3.5-only.
     patch(
         root / "smali_classes7/com/winemu/core/gamepad/GamepadManager.smali",
