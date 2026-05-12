@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Apply login-bypass patches to a decompiled GameHub apktool tree.
-Supports stock 6.0.2 (5.3.5 hook not yet implemented — see TODO).
+Supports stock 5.3.5 and 6.0.2.
 
 Effect: make the app's "is logged in" gate report true unconditionally
 so the launcher Activity proceeds straight to the home screen instead
@@ -48,13 +48,16 @@ This signature is distinctive enough that exactly one class matches
 on stock 6.0.2 (the auth-state combiner). If zero or more than one
 match, the script bails out with a clear error rather than guessing.
 
-5.3.5 (not yet ported)
-----------------------
-On 5.3.5 the auth state is held by a non-obfuscated singleton
-`Lcom/xj/common/user/UserManager;` with explicit `isLogin()Z`,
-`getUid()I`, etc. Five method-body replacements would do the
-equivalent bypass (playday3008/gamehub-patches/pull/13 has the full
-template). Not yet implemented here — open an issue if you need it.
+5.3.5 mechanism
+---------------
+Auth state is held by a non-obfuscated Kotlin singleton at a fixed
+path (`Lcom/xj/common/user/UserManager;` under
+`smali_classes8/com/xj/common/user/`). Five method-body replacements
+do the bypass: `isLogin()Z` always returns true, and `getUid` /
+`getUsername` / `getNickname` / `getAvatar` return synthetic
+constants so any consumer reading them gets benign values instead
+of empties from a never-completed login. Approach lifted from
+playday3008/gamehub-patches PR #13.
 
 Usage:
     python3 apply_login_bypass.py <apktool_decompile_dir>
@@ -370,6 +373,111 @@ def patch_6x_privacy(root: Path) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# 5.3.5 login bypass
+# ---------------------------------------------------------------------------
+#
+# Unlike 6.0.x, 5.3.5 ships UserManager with un-obfuscated symbols at a
+# fixed path. The class is a Kotlin singleton with public-final getters
+# (isLogin, getUid, getUsername, getNickname, getAvatar, getToken, ...).
+# Every gate across the app routes through `UserManager.isLogin()Z` and
+# the launcher's start destination is selected from it; replacing the
+# body to `return true` makes the gate accept the user as signed-in and
+# skips the login screen entirely (Google sign-in / email verification
+# code / etc. — none of those flows ever execute).
+#
+# The other four getters are stubbed to synthetic values so any UI code
+# that reads them while the dialog/profile sheet is open gets benign
+# strings/integers instead of empty values that could trip downstream
+# null/length checks.
+#
+# Approach lifted from playday3008/gamehub-patches PR #13's
+# BypassLoginPatch. We do five method-body replacements on
+# Lcom/xj/common/user/UserManager; — find each by exact-signature regex
+# in a single text pass, replace, write back.
+
+UM_PATH = "smali_classes8/com/xj/common/user/UserManager.smali"
+
+# Each entry: (method signature line, new full method body). Smali
+# `.locals 1` is enough for every replacement — they all just load one
+# constant and return.
+USERMANAGER_PATCHES = {
+    "isLogin()Z": """.method public final isLogin()Z
+    .locals 1
+
+    # BH: login bypass - always report logged-in so the launcher
+    # skips the login Activity. Replaces stock body that checked
+    # `getToken().length > 0 && getUid() >= 0`.
+    const/4 v0, 0x1
+    return v0
+.end method""",
+    "getUid()I": """.method public final getUid()I
+    .locals 1
+
+    # BH: login bypass - synthetic uid (large positive constant so
+    # `getUid() >= 0` checks pass everywhere).
+    const v0, 0x1869f
+    return v0
+.end method""",
+    "getUsername()Ljava/lang/String;": """.method public final getUsername()Ljava/lang/String;
+    .locals 1
+
+    # BH: login bypass - synthetic username.
+    const-string v0, "Local"
+    return-object v0
+.end method""",
+    "getNickname()Ljava/lang/String;": """.method public final getNickname()Ljava/lang/String;
+    .locals 1
+
+    # BH: login bypass - synthetic display name.
+    const-string v0, "Local Player"
+    return-object v0
+.end method""",
+    "getAvatar()Ljava/lang/String;": """.method public final getAvatar()Ljava/lang/String;
+    .locals 1
+
+    # BH: login bypass - empty avatar URL. UI falls back to a
+    # default avatar drawable when this is empty.
+    const-string v0, ""
+    return-object v0
+.end method""",
+}
+
+
+def patch_535(root: Path) -> None:
+    target = root / UM_PATH
+    if not target.is_file():
+        print(
+            f"ERROR: UserManager not found at {UM_PATH}. Is this really a "
+            "stock 5.3.5 apktool tree?",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"Found UserManager: {target.relative_to(root)}")
+
+    src = target.read_text(encoding="utf-8")
+    out = src
+    for sig, new_body in USERMANAGER_PATCHES.items():
+        method_re = re.compile(
+            r'\.method public final '
+            + re.escape(sig)
+            + r'\n.*?\.end method',
+            re.DOTALL,
+        )
+        m = method_re.search(out)
+        if not m:
+            print(
+                f"ERROR: method `public final {sig}` not found in {target.name} "
+                "(stock signature may have shifted between minor 5.3.5 builds)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        out = out[:m.start()] + new_body + out[m.end():]
+        print(f"OK: rewrote UserManager.{sig} -> synthetic constant")
+
+    target.write_text(out, encoding="utf-8")
+
+
 def main():
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -385,16 +493,7 @@ def main():
         patch_6x(root)
         patch_6x_privacy(root)
     elif version == "5.3.5":
-        print(
-            "ERROR: 5.3.5 login bypass not yet implemented in this "
-            "script. The 5.3.5 path needs five method-body replacements "
-            "on Lcom/xj/common/user/UserManager; (isLogin, getUid, "
-            "getUsername, getNickname, getAvatar) — see "
-            "playday3008/gamehub-patches PR #13 for a reference. "
-            "File an issue or extend this script.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        patch_535(root)
     else:
         print(
             f"ERROR: don't know how to bypass login on version '{version}'.",
@@ -402,7 +501,7 @@ def main():
         )
         sys.exit(1)
 
-    print("\nLogin bypass + privacy-popup bypass applied successfully.")
+    print("\nLogin bypass applied successfully.")
 
 
 if __name__ == "__main__":

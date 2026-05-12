@@ -28,7 +28,7 @@ on:
           - '6.0.2'
           - '5.3.5'
       bypass_login:
-        description: 'Bypass the GameHub login screen (and inline privacy footer). 6.0.2 only — 5.3.5 not yet supported.'
+        description: 'Bypass the GameHub login screen. 6.0.2 also bypasses the splash privacy popup. 5.3.5 only has the login screen (no separate privacy modal).'
         required: false
         default: false
         type: boolean
@@ -132,12 +132,13 @@ jobs:
       - name: Apply login bypass (optional)
         if: inputs.bypass_login == true
         run: |
-          # 6.0.2 only — the script rejects 5.3.5 with a clear error.
-          # Rewrites the isLoggedIn-combiner lambda's invokeSuspend body
-          # to always return Boolean.TRUE, which makes the launcher's
-          # start-destination selector pick the home screen instead of
-          # the login screen (and takes the inline privacy footer with
-          # it, since stock GameHub has no separate privacy modal).
+          # 6.0.2: rewrites the isLoggedIn-combiner lambda's invokeSuspend
+          # body to return Boolean.TRUE (skips login screen) and shorts
+          # the SharedPreferences getter for "app_agreement_agreed" to
+          # always return true (skips the splash privacy popup).
+          # 5.3.5: replaces UserManager.isLogin / getUid / getUsername /
+          # getNickname / getAvatar with synthetic constants so the
+          # launcher accepts the user as signed-in (skips login screen).
           python3 scripts/apply_login_bypass.py apktool_out
 
       - name: Rename package for side-by-side install (5.3.5 only)
