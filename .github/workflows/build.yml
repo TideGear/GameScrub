@@ -122,6 +122,145 @@ jobs:
           # it, since stock GameHub has no separate privacy modal).
           python3 scripts/apply_login_bypass.py apktool_out
 
+      - name: Rename package for side-by-side install (5.3.5 only)
+        if: steps.base.outputs.version == '5.3.5'
+        run: |
+          # 5.3.5 and 6.0.2 both ship as package "com.xiaoji.egggame", so
+          # without renaming you can only have one installed at a time. We
+          # treat 6.0.2 as the canonical install and rename the 5.3.5
+          # build to "gamehub.v535" so both coexist.
+          #
+          # Approach mirrors BannerHub upstream (`gamehub.lite`): edit the
+          # apktool-decoded text manifest directly. Apktool's own
+          # renameManifestPackage / aapt2 --rename-manifest-package flag
+          # would only update <manifest package="..."> and miss every
+          # android:authorities= / android:name= permission / etc string,
+          # which leads to authority collisions with the canonical install
+          # at runtime (the same authority can't be claimed by two
+          # packages; second-installer silently loses).
+          #
+          # What we rename:
+          #   - <manifest package="...">                  ← required by Android
+          #   - android:authorities="com.xiaoji.egggame.*" → "gamehub.v535.*"
+          #   - <permission> / <uses-permission> custom names with that prefix
+          #   - android:permission= / android:targetPackage= refs
+          #
+          # What we DO NOT rename:
+          #   - android:name on <activity>/<service>/<provider>/<receiver>
+          #     — those are fully-qualified class refs and point at smali
+          #     classes we never move. Renaming them would orphan the
+          #     classes.
+          #   - smali const-string "com.xiaoji.egggame" literals — leaving
+          #     these intact mirrors BannerHub's behaviour (which doesn't
+          #     touch smali strings either) and the only known case where
+          #     it matters is BuildConfig.APPLICATION_ID inlines, which
+          #     R8 has typically stripped as dead code already.
+          #
+          # The use of a *disjoint* new package (`gamehub.v535`, not
+          # `com.xiaoji.egggame.v535`) is deliberate: a suffix-style name
+          # leaves the old package as a substring of every renamed
+          # authority, which previous attempts confirmed can confuse
+          # Steam-launcher hardcoded prefix checks (init_failed:1004
+          # "Steam service setup failed"). BannerHub avoids this by
+          # using `gamehub.lite` for the same reason.
+          OLD_PKG="com.xiaoji.egggame"
+          NEW_PKG="gamehub.v535"
+          echo "Renaming 5.3.5 build: $OLD_PKG -> $NEW_PKG"
+          python3 - <<PYEOF
+          import re, sys
+          OLD = "${OLD_PKG}"
+          NEW = "${NEW_PKG}"
+          path = "apktool_out/AndroidManifest.xml"
+          with open(path, encoding="utf-8") as f:
+              content = f.read()
+          counts = {"package": 0, "authorities": 0, "perm_decl": 0, "perm_use": 0, "perm_ref": 0, "target_pkg": 0}
+
+          # 1. <manifest package="OLD">.
+          new_content, n = re.subn(
+              r'(<manifest\b[^>]*\bpackage=")' + re.escape(OLD) + r'(")',
+              lambda m: m.group(1) + NEW + m.group(2),
+              content, count=1,
+          )
+          counts["package"] = n
+          content = new_content
+
+          # 2. android:authorities — any value that *contains* OLD as a
+          # token. Authorities may be semicolon-separated lists, hence
+          # the per-segment treatment.
+          def rw_auth(m):
+              parts = []
+              for p in m.group(1).split(";"):
+                  if OLD in p:
+                      counts["authorities"] += 1
+                      parts.append(p.replace(OLD, NEW))
+                  else:
+                      parts.append(p)
+              return 'android:authorities="' + ";".join(parts) + '"'
+          content = re.sub(r'android:authorities="([^"]*)"', rw_auth, content)
+
+          # 3. <permission> / <uses-permission> android:name with OLD prefix.
+          def rw_perm_decl(m):
+              tag, before, name, after = m.group(1), m.group(2), m.group(3), m.group(4)
+              if name == OLD or name.startswith(OLD + "."):
+                  counts["perm_decl" if tag == "permission" else "perm_use"] += 1
+                  return f'<{tag}{before}android:name="{NEW + name[len(OLD):]}"{after}'
+              return m.group(0)
+          content = re.sub(
+              r'<(permission|uses-permission)([^>]*?)android:name="([^"]*)"([^>]*)',
+              rw_perm_decl, content,
+          )
+
+          # 4. android:permission= refs.
+          def rw_perm_ref(m):
+              v = m.group(1)
+              if v == OLD or v.startswith(OLD + "."):
+                  counts["perm_ref"] += 1
+                  return f'android:permission="{NEW + v[len(OLD):]}"'
+              return m.group(0)
+          content = re.sub(r'android:permission="([^"]*)"', rw_perm_ref, content)
+
+          # 5. android:targetPackage (instrumentation).
+          def rw_target(m):
+              if m.group(1) == OLD:
+                  counts["target_pkg"] += 1
+                  return f'android:targetPackage="{NEW}"'
+              return m.group(0)
+          content = re.sub(r'android:targetPackage="([^"]*)"', rw_target, content)
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+          print(f"Manifest rewrites: {counts}")
+          if counts["package"] != 1:
+              print(f"ERROR: expected exactly 1 <manifest package=\"{OLD}\"> rename, got {counts['package']}", file=sys.stderr)
+              sys.exit(1)
+
+          # Verify no authority still references OLD as a token.
+          stale = []
+          for m in re.finditer(r'android:authorities="([^"]*)"', content):
+              for auth in m.group(1).split(";"):
+                  if OLD in auth and NEW not in auth:
+                      stale.append(auth)
+          if stale:
+              print(f"ERROR: authorities still reference {OLD}:", file=sys.stderr)
+              for a in sorted(set(stale)):
+                  print(f"  {a}", file=sys.stderr)
+              sys.exit(1)
+          print("Authority rewrite verification: OK")
+          PYEOF
+
+          echo ""
+          echo "Manifest authorities after rewrite:"
+          grep -oE 'android:authorities="[^"]*"' apktool_out/AndroidManifest.xml | sort -u | sed 's/^/  /'
+
+          # 6. Suffix the launcher label so the home-screen icon for the
+          # renamed install reads "GameHub Lite (5.3.5)" / similar, so it
+          # can be told apart from a canonical install at a glance.
+          if [ -f apktool_out/res/values/strings.xml ]; then
+            sed -i -E 's|(<string name="app_name">)([^<]*)(</string>)|\1\2 (5.3.5)\3|' \
+              apktool_out/res/values/strings.xml
+            echo "app_name suffixed with (5.3.5)"
+          fi
+
       - name: Build libevshim.so (guest-side SDL keepalive)
         run: |
           set -e
