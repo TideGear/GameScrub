@@ -560,10 +560,25 @@ def patch_535_guide_bypass(root: Path) -> None:
         print(f"OK: stubbed RouterUtils.{sig} -> return-void")
     ru.write_text(out, encoding="utf-8")
 
-    # 2. Inject a goto in checkGuideStep$1.invokeSuspend so the
-    # validator skips its entire `verify token -> show next guide
-    # step` body and jumps straight to the DeviceManager.A() check
-    # block (the "we're past all guide gates" branch).
+    # 2. Replace the entire `checkGuideStep$1.invokeSuspend` body with
+    # `return Unit.INSTANCE`. This is the suspend lambda that the
+    # validator dispatches to; returning the Kotlin "completed
+    # successfully with Unit" sentinel tells the coroutine machinery
+    # "done, no work needed" and the caller proceeds to whatever
+    # happens after the guide-step check (in stock 5.3.5, that's the
+    # DeviceManager.A() check → home screen path).
+    #
+    # We use full-body replacement rather than injecting a `goto/16`
+    # into the original body because the original is a state-machine
+    # suspend function with many live registers of different types
+    # (Ref$BooleanRef, Ref$ObjectRef, String, Integer, ...) at every
+    # potential goto site, and the Dalvik verifier requires all
+    # incoming paths to a label to agree on register types. Two
+    # previous attempts at goto injection both crashed with
+    # `java.lang.VerifyError` (first on v4, then on v3) because the
+    # post-injection control-flow merge violated those constraints.
+    # Replacing the whole body is verifier-trivial: one method, one
+    # straight-line return, no merge points.
     cg = root / CHECK_GUIDE_PATH
     if not cg.is_file():
         print(
@@ -574,111 +589,36 @@ def patch_535_guide_bypass(root: Path) -> None:
     print(f"Found checkGuideStep$1: {cg.relative_to(root)}")
     src = cg.read_text(encoding="utf-8")
 
-    # Anchor A: the XjLog.h debug call followed by the boolean-extract +
-    # int-zero sequence and the `if-nez` branch on `p1`. We anchor on
-    # the FULL four-instruction block (not just XjLog.h) because the
-    # Dalvik verifier checks register types at every label boundary,
-    # and our goto target wants `v4` to be a primitive int (not the
-    # `Ref$BooleanRef` it holds before the iget-boolean) and `p1` to
-    # be a primitive int (not the String it holds before the
-    # iget-boolean). Replacing the final `if-nez` with our `goto/16`
-    # — while keeping the two preceding instructions intact — leaves
-    # both registers in the type the natural-fall-through path also
-    # leaves them in, so the verifier accepts the merged state at
-    # `:bh_skip_guide_check`.
-    block_anchor = (
-        '    const-string v5, "checkGuideStep"\n'
+    new_invoke_suspend = (
+        '.method public final invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;\n'
+        '    .locals 1\n'
         '\n'
-        '    .line 183\n'
-        '    .line 184\n'
-        '    invoke-static {v5, p1}, Lcom/xj/common/utils/XjLog;'
-        '->h(Ljava/lang/String;Ljava/lang/String;)V\n'
-        '\n'
-        '    .line 185\n'
-        '    .line 186\n'
-        '    .line 187\n'
-        '    iget-boolean p1, v4, Lkotlin/jvm/internal/Ref$BooleanRef;'
-        '->element:Z\n'
-        '\n'
-        '    .line 188\n'
-        '    .line 189\n'
-        '    const/4 v4, 0x0\n'
-        '\n'
-        '    .line 190\n'
-        '    if-nez p1, :cond_3\n'
+        '    # BH: login bypass - return Unit unconditionally. This\n'
+        '    # short-circuits the guide-step validator coroutine so\n'
+        '    # the privacy popup, avatar wizard, and 401-driven\n'
+        '    # session-expired redirect never fire. Caller treats\n'
+        '    # the return as "validation complete" and falls through\n'
+        '    # to the DeviceManager.A() / home-screen path.\n'
+        '    sget-object v0, Lkotlin/Unit;->INSTANCE:Lkotlin/Unit;\n'
+        '    return-object v0\n'
+        '.end method'
     )
-    if block_anchor not in src:
+    method_re = re.compile(
+        r'\.method public final invokeSuspend\(Ljava/lang/Object;\)Ljava/lang/Object;'
+        r'.*?\.end method',
+        re.DOTALL,
+    )
+    m = method_re.search(src)
+    if not m:
         print(
-            "ERROR: checkGuideStep$1 XjLog.h + boolean-extract block "
-            "anchor not found - stock smali for the validator suspend "
-            "lambda may have shifted.",
+            f"ERROR: invokeSuspend method not found in {cg.name}.",
             file=sys.stderr,
         )
         sys.exit(1)
-
-    # Anchor B: the DeviceManager.a static-field load right after
-    # :cond_8. We inject our jump-target label immediately BEFORE
-    # :cond_8 so the original label stays where it was (other branches
-    # in the method still fall through correctly).
-    dm_anchor = (
-        '    :cond_8\n'
-        '    sget-object p1, '
-        'Lcom/xj/bussiness/devicemanagement/utils/DeviceManager;'
-        '->a:Lcom/xj/bussiness/devicemanagement/utils/DeviceManager;\n'
-    )
-    if dm_anchor not in src:
-        print(
-            "ERROR: checkGuideStep$1 DeviceManager.a anchor not found "
-            "- skip-target label can't be placed.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Replace the `if-nez p1, :cond_3` final instruction with our
-    # `goto/16` while keeping the three preceding instructions
-    # (XjLog.h call + iget-boolean + const/4) intact. goto/16 is
-    # required because the jump distance to :cond_8 exceeds the
-    # 8-bit `goto` range.
-    injected_block = (
-        '    const-string v5, "checkGuideStep"\n'
-        '\n'
-        '    .line 183\n'
-        '    .line 184\n'
-        '    invoke-static {v5, p1}, Lcom/xj/common/utils/XjLog;'
-        '->h(Ljava/lang/String;Ljava/lang/String;)V\n'
-        '\n'
-        '    .line 185\n'
-        '    .line 186\n'
-        '    .line 187\n'
-        '    iget-boolean p1, v4, Lkotlin/jvm/internal/Ref$BooleanRef;'
-        '->element:Z\n'
-        '\n'
-        '    .line 188\n'
-        '    .line 189\n'
-        '    const/4 v4, 0x0\n'
-        '\n'
-        '    # BH: login bypass - skip the guide-step validator body\n'
-        '    # (avatar setup / privacy popup / 401-driven logout). Jump\n'
-        '    # past all checks to the DeviceManager.A() success branch.\n'
-        '    # Keeping the preceding boolean-extract + int-zero pair\n'
-        '    # ensures p1 and v4 are both primitive int at the goto\n'
-        '    # site (Dalvik verifier requires register types to merge\n'
-        '    # cleanly with the natural fall-through path at :cond_8).\n'
-        '    goto/16 :bh_skip_guide_check\n'
-    )
-    src = src.replace(block_anchor, injected_block, 1)
-
-    # Add the target label immediately before :cond_8.
-    injected_label = (
-        '    :bh_skip_guide_check\n'
-        + dm_anchor
-    )
-    src = src.replace(dm_anchor, injected_label, 1)
-
+    src = src[:m.start()] + new_invoke_suspend + src[m.end():]
     cg.write_text(src, encoding="utf-8")
     print(
-        "OK: injected goto/16 :bh_skip_guide_check in "
-        "checkGuideStep$1.invokeSuspend (skips guide-step validator)"
+        "OK: rewrote checkGuideStep$1.invokeSuspend -> return Unit.INSTANCE"
     )
 
 
