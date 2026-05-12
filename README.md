@@ -106,4 +106,4 @@ scripts/
 
 - Not a continuation of BannerHub. The Amazon / Epic / GOG / Component
   Manager / RTS touch / etc. patches that BannerHub layered on top of
-  GameHub are gone. This fork primarily ships **only the vibration mod**.
+  GameHub are gone.
