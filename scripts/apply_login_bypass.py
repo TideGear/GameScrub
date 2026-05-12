@@ -208,6 +208,172 @@ def patch_6x(root: Path) -> None:
     print(f"OK: rewrote {target.name}.invokeSuspend -> return Boolean.TRUE")
 
 
+# ---------------------------------------------------------------------------
+# Privacy-policy popup bypass (6.0.x)
+# ---------------------------------------------------------------------------
+#
+# Login bypass alone is not enough on 6.0.2: the splash screen still pops a
+# Compose modal titled "Privacy Policy" with body "Welcome to GameHub! …"
+# before reaching the launcher, and tapping Disagree quits the app. The
+# strings live in the features.splash compose-resource pool under keys
+# `features_splash_privacy_dialog_*` (base64-encoded values).
+#
+# Gating mechanism:
+#   * Splash ViewModel (obfuscated class `chk` on stock 6.0.2; extends
+#     androidx.lifecycle.ViewModel via `Lod1;`) holds a SharedPreferences
+#     wrapper at field `i:Lii0;`.
+#   * The wrapper is `Ldyj;` — a thin SharedPreferences proxy whose
+#     `e(String, boolean)Z` is a `getBoolean(key, default)` accessor:
+#       method body =
+#         contains(key) ? getBoolean(key, default) : default
+#   * The splash dispatches an Agreement event via `chk.m(Lxgk;)V` which
+#     reads `dyj.e("app_agreement_agreed", false)` to decide what to do
+#     next. If the dialog hasn't been shown / agreed to yet, the splash
+#     model has dialogVisible=true and the Compose pipeline renders the
+#     modal. Once the user taps Agree, the agreement event is fired and
+#     the flag is persisted; subsequent launches return early.
+#
+# Bypass: intercept the getBoolean wrapper. When the key parameter equals
+# "app_agreement_agreed", short-circuit and return true. All other keys
+# fall through to the original logic, so we don't affect any unrelated
+# boolean preference.
+#
+# Locator strategy — by signature, not class name:
+#   * The wrapper implements interface `Lii0;` (same interface the
+#     splash ViewModel's `i` field uses) — but matching by interface
+#     name is fragile since `ii0` is itself R8-obfuscated.
+#   * Instead, scan smali_classes4 for any class whose `e(String, Z)Z`
+#     method body matches the exact getBoolean-with-default shape:
+#     `SharedPreferences.contains` then `SharedPreferences.getBoolean`,
+#     no other side effects. Stock 6.0.2 has exactly one such class.
+
+PRIVACY_KEY = "app_agreement_agreed"
+
+GETBOOL_METHOD_RE = re.compile(
+    r'\.method public final e\(Ljava/lang/String;Z\)Z'
+    r'.*?\.end method',
+    re.DOTALL,
+)
+
+
+def looks_like_pref_wrapper(path: Path) -> bool:
+    """A SharedPreferences boolean-getter wrapper class:
+    has e(String, Z)Z whose body calls SharedPreferences.contains then
+    SharedPreferences.getBoolean. Distinguishes from the splash
+    ViewModel's `m`/`n`/`o` methods (different signatures) and from
+    unrelated `e(String, Z)Z` methods that don't touch SharedPreferences."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return False
+    m = GETBOOL_METHOD_RE.search(text)
+    if not m:
+        return False
+    body = m.group(0)
+    if "Landroid/content/SharedPreferences;->contains(Ljava/lang/String;)Z" not in body:
+        return False
+    if "Landroid/content/SharedPreferences;->getBoolean(Ljava/lang/String;Z)Z" not in body:
+        return False
+    # Should also have the trio of sibling methods that the SharedPref
+    # wrapper class typically exposes (string + int getters/setters).
+    # This narrows the match: the auth-state holder doesn't have these.
+    if ".method public final f(ILjava/lang/String;)I" not in text:
+        return False
+    if ".method public final g(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;" not in text:
+        return False
+    return True
+
+
+def find_pref_wrapper_6x(root: Path) -> Path:
+    """Stock 6.0.2 has the SharedPreferences wrapper in smali_classes4.
+    Scan that dir for the single class matching the wrapper signature."""
+    candidates = []
+    classes4 = root / "smali_classes4"
+    if not classes4.is_dir():
+        print(f"ERROR: {classes4} not found", file=sys.stderr)
+        sys.exit(1)
+    for smali in classes4.glob("*.smali"):
+        if looks_like_pref_wrapper(smali):
+            candidates.append(smali)
+    if not candidates:
+        print(
+            "ERROR: no SharedPreferences boolean-wrapper class found in "
+            "smali_classes4/. Privacy bypass cannot proceed without it. "
+            "If stock GameHub's preference layer has been refactored this "
+            "may need an updated heuristic.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if len(candidates) > 1:
+        print(
+            "ERROR: multiple SharedPreferences wrapper candidates — "
+            "refusing to guess which one is the privacy-flag gate:",
+            file=sys.stderr,
+        )
+        for c in candidates:
+            print(f"  {c}", file=sys.stderr)
+        sys.exit(1)
+    return candidates[0]
+
+
+def patch_6x_privacy(root: Path) -> None:
+    target = find_pref_wrapper_6x(root)
+    print(f"Found preference wrapper: {target.relative_to(root)}")
+    src = target.read_text(encoding="utf-8")
+    m = GETBOOL_METHOD_RE.search(src)
+    if not m:
+        print(f"ERROR: e(String,Z)Z method vanished from {target}", file=sys.stderr)
+        sys.exit(1)
+    original_body = m.group(0)
+
+    # Pull the original .locals N out so we can preserve it. We need at
+    # least 1 free register; the original uses .locals 1 (v0). Our
+    # intercept reuses v0 for the comparison string then for the equals
+    # result, so .locals 1 is fine.
+    locals_m = re.search(r"\.locals\s+(\d+)", original_body)
+    original_locals = int(locals_m.group(1)) if locals_m else 1
+    new_locals = max(original_locals, 1)
+
+    # Inject a prefix block that returns Boolean true when the requested
+    # key matches PRIVACY_KEY, otherwise falls through to the stock body.
+    # Smali rewriting strategy: replace the method declaration line and
+    # inject the intercept right after .locals, before the original body.
+    method_header_re = re.compile(
+        r'(\.method public final e\(Ljava/lang/String;Z\)Z\n'
+        r'\s*\.locals\s+\d+\n)',
+    )
+    intercept = (
+        f"    # BH: privacy popup bypass - short-circuit the\n"
+        f"    # \"{PRIVACY_KEY}\" key to true so the splash screen's\n"
+        f"    # Compose dialog never gates on first launch. All other\n"
+        f"    # keys fall through to the original getBoolean logic.\n"
+        f"    const-string v0, \"{PRIVACY_KEY}\"\n"
+        f"    invoke-virtual {{p1, v0}}, Ljava/lang/String;->equals(Ljava/lang/Object;)Z\n"
+        f"    move-result v0\n"
+        f"    if-eqz v0, :bh_privacy_fallthrough\n"
+        f"    const/4 p0, 0x1\n"
+        f"    return p0\n"
+        f"    :bh_privacy_fallthrough\n\n"
+    )
+    new_body = method_header_re.sub(
+        lambda m: m.group(1).replace(
+            f".locals {original_locals}",
+            f".locals {new_locals}",
+        ) + intercept,
+        original_body,
+        count=1,
+    )
+    if new_body == original_body:
+        print("ERROR: failed to inject privacy intercept (header regex miss)", file=sys.stderr)
+        sys.exit(1)
+    out = src[:m.start()] + new_body + src[m.end():]
+    target.write_text(out, encoding="utf-8")
+    print(
+        f"OK: injected privacy intercept in {target.name}.e(String,Z)Z -> "
+        f"return true when key == \"{PRIVACY_KEY}\""
+    )
+
+
 def main():
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -221,6 +387,7 @@ def main():
     print(f"Detected GameHub base version: {version}")
     if version in ("6.0.1", "6.0.2"):
         patch_6x(root)
+        patch_6x_privacy(root)
     elif version == "5.3.5":
         print(
             "ERROR: 5.3.5 login bypass not yet implemented in this "
@@ -239,7 +406,7 @@ def main():
         )
         sys.exit(1)
 
-    print("\nLogin bypass applied successfully.")
+    print("\nLogin bypass + privacy-popup bypass applied successfully.")
 
 
 if __name__ == "__main__":
