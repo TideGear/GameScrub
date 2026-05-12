@@ -445,6 +445,22 @@ USERMANAGER_PATCHES = {
 
 
 def patch_535(root: Path) -> None:
+    """5.3.5 login bypass has two halves:
+
+    1) Replace 5 UserManager getters with synthetic constants so the
+       launcher's startup gate sees the user as logged-in (skips
+       GuideLoginActivity).
+    2) Bypass the guide-step validator (RouterUtils.checkGuideStep$1
+       + RouterUtils.n / .z) so the post-login privacy popup +
+       create-avatar wizard + periodic session-validity recheck are
+       all short-circuited. Without (2) the app reaches home briefly,
+       then `checkGuideStep` fires, the synthetic session fails the
+       server-side validation, and RouterUtils.z routes back to login
+       with the "Your session has expired" toast.
+
+    Lift from playday3008/gamehub-patches PR #13's BypassLoginPatch +
+    bypassTokenExpiryPatch.
+    """
     target = root / UM_PATH
     if not target.is_file():
         print(
@@ -476,6 +492,151 @@ def patch_535(root: Path) -> None:
         print(f"OK: rewrote UserManager.{sig} -> synthetic constant")
 
     target.write_text(out, encoding="utf-8")
+
+    patch_535_guide_bypass(root)
+
+
+# ---------------------------------------------------------------------------
+# 5.3.5 guide-step / token-expiry bypass
+# ---------------------------------------------------------------------------
+
+ROUTER_UTILS_PATH = "smali_classes8/com/xj/landscape/launcher/router/RouterUtils.smali"
+CHECK_GUIDE_PATH = "smali_classes8/com/xj/landscape/launcher/router/RouterUtils$checkGuideStep$1.smali"
+
+# n()V and z()V both early-return with no side effects. n() is the
+# debounced "schedule a guide-step recheck"; z() is the activity-stack
+# clear + relaunch GuideLoginActivity routine. With both stubbed out,
+# the periodic recheck timer never fires and the session-expired
+# branch (when reached) never restarts the login Activity.
+ROUTER_NOOP_METHODS = {
+    "n()V": """.method public n()V
+    .locals 0
+
+    # BH: login bypass - no-op the guide-step recheck timer entry so
+    # the synthetic session is never re-validated against the server.
+    return-void
+.end method""",
+    "z()V": """.method public final z()V
+    .locals 0
+
+    # BH: login bypass - no-op the relaunch-to-login routine so a
+    # 401 anywhere never kicks the user back to GuideLoginActivity.
+    return-void
+.end method""",
+}
+
+
+def patch_535_guide_bypass(root: Path) -> None:
+    # 1. Stub n() and z() on RouterUtils.
+    ru = root / ROUTER_UTILS_PATH
+    if not ru.is_file():
+        print(
+            f"ERROR: RouterUtils not found at {ROUTER_UTILS_PATH}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"Found RouterUtils: {ru.relative_to(root)}")
+    src = ru.read_text(encoding="utf-8")
+    out = src
+    for sig, new_body in ROUTER_NOOP_METHODS.items():
+        # Match `.method public[ final] <sig>` so the regex picks up
+        # whichever modifiers stock uses (n() is `public`, z() is
+        # `public final`).
+        method_re = re.compile(
+            r'\.method public(?: final)? '
+            + re.escape(sig)
+            + r'\n.*?\.end method',
+            re.DOTALL,
+        )
+        m = method_re.search(out)
+        if not m:
+            print(
+                f"ERROR: method `public[ final] {sig}` not found in "
+                f"{ru.name}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        out = out[:m.start()] + new_body + out[m.end():]
+        print(f"OK: stubbed RouterUtils.{sig} -> return-void")
+    ru.write_text(out, encoding="utf-8")
+
+    # 2. Inject a goto in checkGuideStep$1.invokeSuspend so the
+    # validator skips its entire `verify token -> show next guide
+    # step` body and jumps straight to the DeviceManager.A() check
+    # block (the "we're past all guide gates" branch).
+    cg = root / CHECK_GUIDE_PATH
+    if not cg.is_file():
+        print(
+            f"ERROR: checkGuideStep$1 not found at {CHECK_GUIDE_PATH}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"Found checkGuideStep$1: {cg.relative_to(root)}")
+    src = cg.read_text(encoding="utf-8")
+
+    # Anchor A: the XjLog.h("checkGuideStep", p1) debug call after which
+    # we want execution to jump. The const-string + invoke-static pair
+    # is unique in this file (no other "checkGuideStep" literal usage).
+    log_anchor = (
+        '    const-string v5, "checkGuideStep"\n'
+        '\n'
+        '    .line 183\n'
+        '    .line 184\n'
+        '    invoke-static {v5, p1}, Lcom/xj/common/utils/XjLog;'
+        '->h(Ljava/lang/String;Ljava/lang/String;)V\n'
+    )
+    if log_anchor not in src:
+        print(
+            "ERROR: checkGuideStep$1 XjLog.h anchor not found - stock "
+            "smali for the validator suspend lambda may have shifted.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Anchor B: the DeviceManager.a static-field load right after
+    # :cond_8. We inject our jump-target label immediately BEFORE
+    # :cond_8 so the original label stays where it was (other branches
+    # in the method still fall through correctly).
+    dm_anchor = (
+        '    :cond_8\n'
+        '    sget-object p1, '
+        'Lcom/xj/bussiness/devicemanagement/utils/DeviceManager;'
+        '->a:Lcom/xj/bussiness/devicemanagement/utils/DeviceManager;\n'
+    )
+    if dm_anchor not in src:
+        print(
+            "ERROR: checkGuideStep$1 DeviceManager.a anchor not found "
+            "- skip-target label can't be placed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Inject the goto right after XjLog.h. goto/16 is required because
+    # the jump distance from line ~585 to line ~897 (>16 KB of smali
+    # text but only ~300 instructions) exceeds the 8-bit goto range
+    # in some apktool-emitted offset encodings; use the safe form.
+    injected_goto = (
+        log_anchor
+        + '\n'
+        + '    # BH: login bypass - skip the guide-step validator body\n'
+        + '    # (avatar setup / privacy popup / 401-driven logout). Jump\n'
+        + '    # past all checks to the DeviceManager.A() success branch.\n'
+        + '    goto/16 :bh_skip_guide_check\n'
+    )
+    src = src.replace(log_anchor, injected_goto, 1)
+
+    # Add the target label immediately before :cond_8.
+    injected_label = (
+        '    :bh_skip_guide_check\n'
+        + dm_anchor
+    )
+    src = src.replace(dm_anchor, injected_label, 1)
+
+    cg.write_text(src, encoding="utf-8")
+    print(
+        "OK: injected goto/16 :bh_skip_guide_check in "
+        "checkGuideStep$1.invokeSuspend (skips guide-step validator)"
+    )
 
 
 def main():
