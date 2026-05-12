@@ -68,8 +68,8 @@ The pipeline:
    6.0.2, five on 5.3.5 (extra connect-time wake-up)
 4. (optional 6.0.2 only) `python3 scripts/apply_login_bypass.py` — patch
    the auth-state combiner + privacy-popup gate
-5. (5.3.5 only) rename package to `gamehub.v535` so it coexists with
-   the canonical 6.0.2 install — direct manifest edit, no apktool
+5. (optional 5.3.5 only) rename package to `gamehub.v535` for side-by-
+   side install (see below) — direct manifest edit, no apktool
    `renameManifestPackage` (mirrors BannerHub's `gamehub.lite` recipe)
 6. `cmake/ninja` build of `native/evshim/libevshim.so` for arm64-v8a
 7. `apktool b`
@@ -82,13 +82,18 @@ The pipeline:
 ### Side-by-side install
 
 5.3.5 and 6.0.2 both ship as `package com.xiaoji.egggame` upstream, so
-only one can be installed at a time without intervention. The CI
-treats 6.0.2 as the canonical install (keeps the original package
-name) and always renames the 5.3.5 build to `package gamehub.v535`,
-with all FileProvider authorities and custom permission names
-rewritten under the new prefix and the launcher label suffixed
-`(5.3.5)`. Both APKs install side-by-side; each gets its own
-`/data/data/` directory (separate Wine prefix, separate Steam
+only one can be installed at a time without intervention. There's a
+`side_by_side` workflow_dispatch boolean (5.3.5 only — ignored on
+6.0.2 and on tag-triggered builds) that renames the 5.3.5 build to
+`package gamehub.v535` with all FileProvider authorities and custom
+permission names rewritten under the new prefix, the launcher label
+suffixed `(5.3.5)`, and the output APK named
+`GameHub-Vibration-Fix-5.3.5-sbs.apk` so it doesn't collide with the
+canonical artifact.
+
+When both `GameHub-Vibration-Fix-5.3.5-sbs.apk` (renamed) and
+`GameHub-Vibration-Fix-6.0.2.apk` (canonical) are installed, each gets
+its own `/data/data/` directory (separate Wine prefix, separate Steam
 install, no shared game library).
 
 Mirrors BannerHub upstream's `gamehub.lite` recipe — the rename is a

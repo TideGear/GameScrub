@@ -32,6 +32,11 @@ on:
         required: false
         default: false
         type: boolean
+      side_by_side:
+        description: 'Rename 5.3.5 package to gamehub.v535 so it installs alongside a canonical 6.0.2. Ignored on 6.0.2.'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -59,9 +64,22 @@ jobs:
             echo "ERROR: could not resolve base version from event=${{ github.event_name }} ref=${GITHUB_REF}" >&2
             exit 1
           fi
+
+          # Side-by-side rename is opt-in via workflow_dispatch only.
+          # `inputs.side_by_side` is empty for tag-push events, which
+          # evaluates to false → tag-driven release builds keep the
+          # canonical package. Only meaningful on 5.3.5; ignored on 6.0.2.
+          SBS_FLAG="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+              && [ "${{ inputs.side_by_side }}" = "true" ] \
+              && [ "$VER" = "5.3.5" ]; then
+            SBS_FLAG="true"
+          fi
+
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "release_tag=base-apk-$VER" >> "$GITHUB_OUTPUT"
-          echo "Base version: $VER"
+          echo "side_by_side=$SBS_FLAG" >> "$GITHUB_OUTPUT"
+          echo "Base version: $VER (side_by_side=$SBS_FLAG)"
 
       - name: Download original GameHub APK
         run: |
@@ -123,7 +141,7 @@ jobs:
           python3 scripts/apply_login_bypass.py apktool_out
 
       - name: Rename package for side-by-side install (5.3.5 only)
-        if: steps.base.outputs.version == '5.3.5'
+        if: steps.base.outputs.side_by_side == 'true'
         run: |
           # 5.3.5 and 6.0.2 both ship as package "com.xiaoji.egggame", so
           # without renaming you can only have one installed at a time. We
@@ -326,17 +344,24 @@ jobs:
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/zipalign -f -v 4 \
               rebuilt-unsigned.apk rebuilt-aligned.apk
 
-          # Sign with the repo's testkey
-          OUT="GameHub-Vibration-Fix-${{ steps.base.outputs.version }}.apk"
+          # Sign with the repo's testkey. Suffix output name with "-sbs"
+          # when the build was renamed for side-by-side install so the
+          # canonical and SBS artifacts don't collide if you build both.
+          SBS_SUFFIX=""
+          if [ "${{ steps.base.outputs.side_by_side }}" = "true" ]; then
+            SBS_SUFFIX="-sbs"
+          fi
+          OUT="GameHub-Vibration-Fix-${{ steps.base.outputs.version }}${SBS_SUFFIX}.apk"
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/apksigner sign \
               --key testkey.pk8 --cert testkey.x509.pem \
               --out "$OUT" \
               rebuilt-aligned.apk
           ls -lh "$OUT"
           echo "out_apk=$OUT" >> "$GITHUB_ENV"
+          echo "out_artifact=GameHub-Vibration-Fix-${{ steps.base.outputs.version }}${SBS_SUFFIX}" >> "$GITHUB_ENV"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GameHub-Vibration-Fix-${{ steps.base.outputs.version }}
+          name: ${{ env.out_artifact }}
           path: ${{ env.out_apk }}
