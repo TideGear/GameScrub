@@ -574,21 +574,44 @@ def patch_535_guide_bypass(root: Path) -> None:
     print(f"Found checkGuideStep$1: {cg.relative_to(root)}")
     src = cg.read_text(encoding="utf-8")
 
-    # Anchor A: the XjLog.h("checkGuideStep", p1) debug call after which
-    # we want execution to jump. The const-string + invoke-static pair
-    # is unique in this file (no other "checkGuideStep" literal usage).
-    log_anchor = (
+    # Anchor A: the XjLog.h debug call followed by the boolean-extract +
+    # int-zero sequence and the `if-nez` branch on `p1`. We anchor on
+    # the FULL four-instruction block (not just XjLog.h) because the
+    # Dalvik verifier checks register types at every label boundary,
+    # and our goto target wants `v4` to be a primitive int (not the
+    # `Ref$BooleanRef` it holds before the iget-boolean) and `p1` to
+    # be a primitive int (not the String it holds before the
+    # iget-boolean). Replacing the final `if-nez` with our `goto/16`
+    # — while keeping the two preceding instructions intact — leaves
+    # both registers in the type the natural-fall-through path also
+    # leaves them in, so the verifier accepts the merged state at
+    # `:bh_skip_guide_check`.
+    block_anchor = (
         '    const-string v5, "checkGuideStep"\n'
         '\n'
         '    .line 183\n'
         '    .line 184\n'
         '    invoke-static {v5, p1}, Lcom/xj/common/utils/XjLog;'
         '->h(Ljava/lang/String;Ljava/lang/String;)V\n'
+        '\n'
+        '    .line 185\n'
+        '    .line 186\n'
+        '    .line 187\n'
+        '    iget-boolean p1, v4, Lkotlin/jvm/internal/Ref$BooleanRef;'
+        '->element:Z\n'
+        '\n'
+        '    .line 188\n'
+        '    .line 189\n'
+        '    const/4 v4, 0x0\n'
+        '\n'
+        '    .line 190\n'
+        '    if-nez p1, :cond_3\n'
     )
-    if log_anchor not in src:
+    if block_anchor not in src:
         print(
-            "ERROR: checkGuideStep$1 XjLog.h anchor not found - stock "
-            "smali for the validator suspend lambda may have shifted.",
+            "ERROR: checkGuideStep$1 XjLog.h + boolean-extract block "
+            "anchor not found - stock smali for the validator suspend "
+            "lambda may have shifted.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -611,19 +634,39 @@ def patch_535_guide_bypass(root: Path) -> None:
         )
         sys.exit(1)
 
-    # Inject the goto right after XjLog.h. goto/16 is required because
-    # the jump distance from line ~585 to line ~897 (>16 KB of smali
-    # text but only ~300 instructions) exceeds the 8-bit goto range
-    # in some apktool-emitted offset encodings; use the safe form.
-    injected_goto = (
-        log_anchor
-        + '\n'
-        + '    # BH: login bypass - skip the guide-step validator body\n'
-        + '    # (avatar setup / privacy popup / 401-driven logout). Jump\n'
-        + '    # past all checks to the DeviceManager.A() success branch.\n'
-        + '    goto/16 :bh_skip_guide_check\n'
+    # Replace the `if-nez p1, :cond_3` final instruction with our
+    # `goto/16` while keeping the three preceding instructions
+    # (XjLog.h call + iget-boolean + const/4) intact. goto/16 is
+    # required because the jump distance to :cond_8 exceeds the
+    # 8-bit `goto` range.
+    injected_block = (
+        '    const-string v5, "checkGuideStep"\n'
+        '\n'
+        '    .line 183\n'
+        '    .line 184\n'
+        '    invoke-static {v5, p1}, Lcom/xj/common/utils/XjLog;'
+        '->h(Ljava/lang/String;Ljava/lang/String;)V\n'
+        '\n'
+        '    .line 185\n'
+        '    .line 186\n'
+        '    .line 187\n'
+        '    iget-boolean p1, v4, Lkotlin/jvm/internal/Ref$BooleanRef;'
+        '->element:Z\n'
+        '\n'
+        '    .line 188\n'
+        '    .line 189\n'
+        '    const/4 v4, 0x0\n'
+        '\n'
+        '    # BH: login bypass - skip the guide-step validator body\n'
+        '    # (avatar setup / privacy popup / 401-driven logout). Jump\n'
+        '    # past all checks to the DeviceManager.A() success branch.\n'
+        '    # Keeping the preceding boolean-extract + int-zero pair\n'
+        '    # ensures p1 and v4 are both primitive int at the goto\n'
+        '    # site (Dalvik verifier requires register types to merge\n'
+        '    # cleanly with the natural fall-through path at :cond_8).\n'
+        '    goto/16 :bh_skip_guide_check\n'
     )
-    src = src.replace(log_anchor, injected_goto, 1)
+    src = src.replace(block_anchor, injected_block, 1)
 
     # Add the target label immediately before :cond_8.
     injected_label = (
