@@ -29,6 +29,11 @@ on:
           - '6.0.2'
           - '6.0.1'
           - '5.3.5'
+      bypass_login:
+        description: 'Bypass the GameHub login screen (and inline privacy footer). 6.0.2 only — 5.3.5 not yet supported.'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -107,6 +112,17 @@ jobs:
           # from the smali layout of the decompiled tree. Per-version anchor
           # set + rename maps live at the top of that script.
           python3 scripts/apply_vibration_patches.py apktool_out
+
+      - name: Apply login bypass (optional)
+        if: inputs.bypass_login == true
+        run: |
+          # 6.0.2 only — the script rejects 5.3.5 with a clear error.
+          # Rewrites the isLoggedIn-combiner lambda's invokeSuspend body
+          # to always return Boolean.TRUE, which makes the launcher's
+          # start-destination selector pick the home screen instead of
+          # the login screen (and takes the inline privacy footer with
+          # it, since stock GameHub has no separate privacy modal).
+          python3 scripts/apply_login_bypass.py apktool_out
 
       - name: Build libevshim.so (guest-side SDL keepalive)
         run: |

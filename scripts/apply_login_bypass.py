@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+Apply login-bypass patches to a decompiled GameHub apktool tree.
+Supports stock 6.0.2 (5.3.5 hook not yet implemented — see TODO).
+
+Effect: make the app's "is logged in" gate report true unconditionally
+so the launcher Activity proceeds straight to the home screen instead
+of routing through the login screen. The privacy-policy text in
+stock GameHub lives inline on the login screen footer (there is no
+separate first-launch privacy dialog in 5.3.5 / 6.0.2), so bypassing
+the login screen also takes the privacy popup with it.
+
+6.0.2 mechanism
+---------------
+The "is logged in" state is a Compose StateFlow<Boolean> exposed by
+the auth state holder `Lit0;` (field `c`, returned by `it0.h()`). The
+StateFlow is derived from a combine() of two upstream flows:
+
+    user  = userDao.observeCurrentUser()  -> StateFlow<UserEntity?>
+    token = authTokenDao.observeCurrent() -> StateFlow<AuthTokenEntity?>
+    isLoggedIn = combine(user, token) { u, t -> u != null && t != null }
+
+The combine lambda is class `Ldt0;` (extends SuspendLambda, implements
+Function3). Its `invokeSuspend()` returns `Boolean.valueOf(user != null
+&& token != null)`. We rewrite the body to always return
+`Boolean.TRUE`, which makes every downstream observer (including the
+Compose start-destination selector that picks home-vs-login) see the
+user as authenticated.
+
+Locator strategy — by signature, not by class name
+--------------------------------------------------
+The class name `dt0` is R8-obfuscated and shifts between minor
+6.0.x releases. Rather than hardcode it, we scan all `smali_classes4/`
+files for a class that has:
+  - Two synthetic instance fields `L$0:Ljava/lang/Object;` and
+    `L$1:Ljava/lang/Object;` (the captured args of a 2-input combine
+    lambda).
+  - A NON-suspending `invokeSuspend()` body: it must do its
+    null-checks + Boolean boxing in a single straight-line block.
+    Concretely: exactly one `Boolean.valueOf(Z)` call, no
+    `iput-object …, …, L$[01]:` writes inside invokeSuspend (writes
+    indicate state-machine resumption, which the simple auth
+    combiner doesn't need), and a tight `.locals` budget (≤4).
+  - Body length under ~2 KB — auth combiner is ~1.3 KB. Larger
+    matches are state-machine-laden combine lambdas elsewhere
+    (e.g. media-focus combiners that capture many fields).
+This signature is distinctive enough that exactly one class matches
+on stock 6.0.2 (the auth-state combiner). If zero or more than one
+match, the script bails out with a clear error rather than guessing.
+
+5.3.5 (not yet ported)
+----------------------
+On 5.3.5 the auth state is held by a non-obfuscated singleton
+`Lcom/xj/common/user/UserManager;` with explicit `isLogin()Z`,
+`getUid()I`, etc. Five method-body replacements would do the
+equivalent bypass (playday3008/gamehub-patches/pull/13 has the full
+template). Not yet implemented here — open an issue if you need it.
+
+Usage:
+    python3 apply_login_bypass.py <apktool_decompile_dir>
+
+Fails fast: exits non-zero if the bypass target can't be unambiguously
+identified.
+"""
+import re
+import sys
+from pathlib import Path
+
+
+# Method body the bypass replaces — common across both invokeSuspend
+# variants found in the wild (R8 may emit `.locals 1` or `.locals 2`).
+BYPASS_METHOD = """.method public final invokeSuspend(Ljava/lang/Object;)Ljava/lang/Object;
+    .locals 1
+
+    # BH: login bypass — force isLoggedIn = true unconditionally.
+    # Replaces the original `user != null && token != null` combiner
+    # in the auth state holder's StateFlow derivation. Every consumer
+    # of the resulting StateFlow now sees the user as authenticated,
+    # which makes the launcher's start-destination selector pick the
+    # home screen instead of the login screen.
+    const/4 v0, 0x1
+    invoke-static {v0}, Ljava/lang/Boolean;->valueOf(Z)Ljava/lang/Boolean;
+    move-result-object v0
+    return-object v0
+.end method"""
+
+
+METHOD_RE = re.compile(
+    r'\.method public final invokeSuspend\(Ljava/lang/Object;\)Ljava/lang/Object;'
+    r'.*?\.end method',
+    re.DOTALL,
+)
+
+
+def looks_like_auth_combiner(path: Path) -> bool:
+    """A 2-input combine lambda has L$0 + L$1 synthetic fields and an
+    invokeSuspend that ANDs them and boxes to Boolean. Must be a
+    straight-line method (no suspend state machine) — that's what
+    distinguishes the auth combiner from larger combine lambdas that
+    happen to share the L$0+L$1 field layout (e.g. media-focus
+    combiners with .locals 44 and many iput-object L$0 writes for
+    resumption state)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return False
+    if ".field synthetic L$0:Ljava/lang/Object;" not in text:
+        return False
+    if ".field synthetic L$1:Ljava/lang/Object;" not in text:
+        return False
+    m = METHOD_RE.search(text)
+    if not m:
+        return False
+    body = m.group(0)
+    # Required: both null-checks + a Boolean boxing.
+    if "if-eqz v0, :cond_" not in body:
+        return False
+    if "if-eqz v1, :cond_" not in body:
+        return False
+    if body.count("Ljava/lang/Boolean;->valueOf(Z)Ljava/lang/Boolean;") != 1:
+        return False
+    # Reject state-machine-laden combines: those write the suspended
+    # state into L$0/L$1 inside invokeSuspend before yielding. The
+    # auth combiner never suspends so it never does these writes.
+    if "L$0:Ljava/lang/Object;\n" in body and "iput-object" in body \
+            and re.search(r"iput-object\s+\S+,\s+\S+,\s+L\S+;->L\$[01]:", body):
+        return False
+    # Auth combiner has a small register budget (.locals 2 in 6.0.2);
+    # >4 reliably indicates a state-machine combine.
+    locals_m = re.search(r"\.locals\s+(\d+)", body)
+    if locals_m and int(locals_m.group(1)) > 4:
+        return False
+    # Auth combiner body is ~1.3 KB; >2 KB indicates a state machine.
+    if len(body) > 2048:
+        return False
+    return True
+
+
+def detect_version(root: Path) -> str:
+    """Match the same probe set used by apply_vibration_patches.py."""
+    if (root / "smali_classes3/za8.smali").is_file() \
+            and (root / "smali_classes3/dg5.smali").is_file():
+        return "6.0.2"
+    if (root / "smali_classes3/g58.smali").is_file() \
+            and (root / "smali_classes3/sc5.smali").is_file():
+        return "6.0.1"
+    if (root / "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali").is_file():
+        return "5.3.5"
+    return "unknown"
+
+
+def find_auth_combiner_6x(root: Path) -> Path:
+    """Scan smali_classes4 for the single auth-state combiner lambda.
+
+    The class is in smali_classes4 on both 6.0.1 and 6.0.2 (it's
+    co-located with the auth state holder `it0`/equivalent in stock
+    Tencent's R8 output). Walking only classes4 keeps the scan fast
+    and avoids matching unrelated 2-arg combine lambdas elsewhere
+    (image-loading combines, etc., that happen to share the L$0+L$1
+    field layout).
+    """
+    candidates = []
+    classes4 = root / "smali_classes4"
+    if not classes4.is_dir():
+        print(f"ERROR: {classes4} not found", file=sys.stderr)
+        sys.exit(1)
+    for smali in classes4.glob("*.smali"):
+        if looks_like_auth_combiner(smali):
+            candidates.append(smali)
+    if not candidates:
+        print(
+            "ERROR: no auth-state combiner lambda found in smali_classes4/.\n"
+            "Stock GameHub's auth-state observer should expose a 2-arg "
+            "combine lambda with L$0+L$1 synthetic fields and an "
+            "invokeSuspend that returns Boolean.valueOf(user!=null && token!=null). "
+            "Either the smali layout has shifted in this base version, or "
+            "this isn't a GameHub apktool tree.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if len(candidates) > 1:
+        print(
+            "ERROR: multiple auth-combiner candidates found, refusing to "
+            "guess which one is the right login gate:",
+            file=sys.stderr,
+        )
+        for c in candidates:
+            print(f"  {c}", file=sys.stderr)
+        print(
+            "\nNarrow the signature check in looks_like_auth_combiner() "
+            "before re-running.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return candidates[0]
+
+
+def patch_6x(root: Path) -> None:
+    target = find_auth_combiner_6x(root)
+    print(f"Found auth-combiner: {target.relative_to(root)}")
+    src = target.read_text(encoding="utf-8")
+    m = METHOD_RE.search(src)
+    if not m:
+        print(f"ERROR: invokeSuspend method vanished from {target}", file=sys.stderr)
+        sys.exit(1)
+    out = src[:m.start()] + BYPASS_METHOD + src[m.end():]
+    target.write_text(out, encoding="utf-8")
+    print(f"OK: rewrote {target.name}.invokeSuspend -> return Boolean.TRUE")
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)
+    root = Path(sys.argv[1])
+    if not root.is_dir():
+        print(f"ERROR: {root} is not a directory", file=sys.stderr)
+        sys.exit(2)
+
+    version = detect_version(root)
+    print(f"Detected GameHub base version: {version}")
+    if version in ("6.0.1", "6.0.2"):
+        patch_6x(root)
+    elif version == "5.3.5":
+        print(
+            "ERROR: 5.3.5 login bypass not yet implemented in this "
+            "script. The 5.3.5 path needs five method-body replacements "
+            "on Lcom/xj/common/user/UserManager; (isLogin, getUid, "
+            "getUsername, getNickname, getAvatar) — see "
+            "playday3008/gamehub-patches PR #13 for a reference. "
+            "File an issue or extend this script.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    else:
+        print(
+            f"ERROR: don't know how to bypass login on version '{version}'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print("\nLogin bypass applied successfully.")
+
+
+if __name__ == "__main__":
+    main()
