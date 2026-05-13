@@ -5,8 +5,8 @@ name: Build APK
 # rumble keepalive on top of stock GameHub. Otherwise unchanged from
 # upstream Tencent build.
 #
-# Supports stock 5.3.5, 6.0.2, and 6.0.4 (apply_vibration_patches.py
-# auto-detects the version from the smali layout of the decompiled tree).
+# Supports stock 6.0.2 and 6.0.4 (apply_vibration_patches.py auto-detects
+# the version from the smali layout of the decompiled tree).
 #
 # Setup once per base version: upload the original GameHub APK as an
 # asset on a release tagged `base-apk-<version>` in this repo (e.g.
@@ -15,7 +15,6 @@ name: Build APK
 on:
   push:
     tags:
-      - 'v*-5.3.5*'
       - 'v*-6.0.2*'
       - 'v*-6.0.4*'
   workflow_dispatch:
@@ -28,14 +27,8 @@ on:
         options:
           - '6.0.4'
           - '6.0.2'
-          - '5.3.5'
       bypass_login:
-        description: 'Bypass the GameHub login screen. 6.0.x also bypasses the splash privacy popup. 5.3.5 has its own privacy bypass + guide-step skip.'
-        required: false
-        default: false
-        type: boolean
-      side_by_side:
-        description: 'Rename 5.3.5 package to gamehub.v535 so it installs alongside a canonical 6.0.x. Ignored on 6.0.x.'
+        description: 'Bypass the GameHub login screen and the splash privacy popup.'
         required: false
         default: false
         type: boolean
@@ -60,28 +53,16 @@ jobs:
             VER="${{ inputs.base_version }}"
           else
             REF="${GITHUB_REF#refs/tags/}"
-            VER="$(echo "$REF" | sed -nE 's/.*-(5\.3\.5|6\.0\.2|6\.0\.4).*/\1/p')"
+            VER="$(echo "$REF" | sed -nE 's/.*-(6\.0\.2|6\.0\.4).*/\1/p')"
           fi
           if [ -z "$VER" ]; then
             echo "ERROR: could not resolve base version from event=${{ github.event_name }} ref=${GITHUB_REF}" >&2
             exit 1
           fi
 
-          # Side-by-side rename is opt-in via workflow_dispatch only.
-          # `inputs.side_by_side` is empty for tag-push events, which
-          # evaluates to false → tag-driven release builds keep the
-          # canonical package. Only meaningful on 5.3.5; ignored on 6.0.x.
-          SBS_FLAG="false"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
-              && [ "${{ inputs.side_by_side }}" = "true" ] \
-              && [ "$VER" = "5.3.5" ]; then
-            SBS_FLAG="true"
-          fi
-
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "release_tag=base-apk-$VER" >> "$GITHUB_OUTPUT"
-          echo "side_by_side=$SBS_FLAG" >> "$GITHUB_OUTPUT"
-          echo "Base version: $VER (side_by_side=$SBS_FLAG)"
+          echo "Base version: $VER"
 
       - name: Download original GameHub APK
         run: |
@@ -111,8 +92,7 @@ jobs:
           # 6.0.x's AndroidManifest uses two attributes whose namespaces aren't in
           # the framework apktool 2.9.3 ships with. They're cosmetic (BLUETOOTH_SCAN
           # flag + predictive-back opt-in); stripping is harmless for a vibration-mod
-          # test build. The regexes are no-ops on 5.3.5 where these attributes don't
-          # exist in the manifest.
+          # test build.
           python3 - <<'PYEOF'
           import re
           with open('apktool_out/AndroidManifest.xml', 'r', encoding='utf-8') as f:
@@ -126,161 +106,19 @@ jobs:
 
       - name: Apply BhVibration smali patches
         run: |
-          # apply_vibration_patches.py auto-detects 5.3.5 / 6.0.2 / 6.0.4
-          # from the smali layout of the decompiled tree. Per-version
-          # anchor set + rename maps live at the top of that script.
+          # apply_vibration_patches.py auto-detects 6.0.2 / 6.0.4 from
+          # the smali layout of the decompiled tree. Per-version anchor
+          # set + rename maps live at the top of that script.
           python3 scripts/apply_vibration_patches.py apktool_out
 
       - name: Apply login bypass (optional)
         if: inputs.bypass_login == true
         run: |
-          # 6.0.2: rewrites the isLoggedIn-combiner lambda's invokeSuspend
-          # body to return Boolean.TRUE (skips login screen) and shorts
-          # the SharedPreferences getter for "app_agreement_agreed" to
+          # Rewrites the isLoggedIn-combiner lambda's invokeSuspend body
+          # to return Boolean.TRUE (skips login screen) and shorts the
+          # SharedPreferences getter for "app_agreement_agreed" to
           # always return true (skips the splash privacy popup).
-          # 5.3.5: replaces UserManager.isLogin / getUid / getUsername /
-          # getNickname / getAvatar with synthetic constants so the
-          # launcher accepts the user as signed-in (skips login screen).
           python3 scripts/apply_login_bypass.py apktool_out
-
-      - name: Rename package for side-by-side install (5.3.5 only)
-        if: steps.base.outputs.side_by_side == 'true'
-        run: |
-          # 5.3.5 and 6.0.2 both ship as package "com.xiaoji.egggame", so
-          # without renaming you can only have one installed at a time. We
-          # treat 6.0.2 as the canonical install and rename the 5.3.5
-          # build to "gamehub.v535" so both coexist.
-          #
-          # Approach mirrors BannerHub upstream (`gamehub.lite`): edit the
-          # apktool-decoded text manifest directly. Apktool's own
-          # renameManifestPackage / aapt2 --rename-manifest-package flag
-          # would only update <manifest package="..."> and miss every
-          # android:authorities= / android:name= permission / etc string,
-          # which leads to authority collisions with the canonical install
-          # at runtime (the same authority can't be claimed by two
-          # packages; second-installer silently loses).
-          #
-          # What we rename:
-          #   - <manifest package="...">                  ← required by Android
-          #   - android:authorities="com.xiaoji.egggame.*" → "gamehub.v535.*"
-          #   - <permission> / <uses-permission> custom names with that prefix
-          #   - android:permission= / android:targetPackage= refs
-          #
-          # What we DO NOT rename:
-          #   - android:name on <activity>/<service>/<provider>/<receiver>
-          #     — those are fully-qualified class refs and point at smali
-          #     classes we never move. Renaming them would orphan the
-          #     classes.
-          #   - smali const-string "com.xiaoji.egggame" literals — leaving
-          #     these intact mirrors BannerHub's behaviour (which doesn't
-          #     touch smali strings either) and the only known case where
-          #     it matters is BuildConfig.APPLICATION_ID inlines, which
-          #     R8 has typically stripped as dead code already.
-          #
-          # The use of a *disjoint* new package (`gamehub.v535`, not
-          # `com.xiaoji.egggame.v535`) is deliberate: a suffix-style name
-          # leaves the old package as a substring of every renamed
-          # authority, which previous attempts confirmed can confuse
-          # Steam-launcher hardcoded prefix checks (init_failed:1004
-          # "Steam service setup failed"). BannerHub avoids this by
-          # using `gamehub.lite` for the same reason.
-          OLD_PKG="com.xiaoji.egggame"
-          NEW_PKG="gamehub.v535"
-          echo "Renaming 5.3.5 build: $OLD_PKG -> $NEW_PKG"
-          python3 - <<PYEOF
-          import re, sys
-          OLD = "${OLD_PKG}"
-          NEW = "${NEW_PKG}"
-          path = "apktool_out/AndroidManifest.xml"
-          with open(path, encoding="utf-8") as f:
-              content = f.read()
-          counts = {"package": 0, "authorities": 0, "perm_decl": 0, "perm_use": 0, "perm_ref": 0, "target_pkg": 0}
-
-          # 1. <manifest package="OLD">.
-          new_content, n = re.subn(
-              r'(<manifest\b[^>]*\bpackage=")' + re.escape(OLD) + r'(")',
-              lambda m: m.group(1) + NEW + m.group(2),
-              content, count=1,
-          )
-          counts["package"] = n
-          content = new_content
-
-          # 2. android:authorities — any value that *contains* OLD as a
-          # token. Authorities may be semicolon-separated lists, hence
-          # the per-segment treatment.
-          def rw_auth(m):
-              parts = []
-              for p in m.group(1).split(";"):
-                  if OLD in p:
-                      counts["authorities"] += 1
-                      parts.append(p.replace(OLD, NEW))
-                  else:
-                      parts.append(p)
-              return 'android:authorities="' + ";".join(parts) + '"'
-          content = re.sub(r'android:authorities="([^"]*)"', rw_auth, content)
-
-          # 3. <permission> / <uses-permission> android:name with OLD prefix.
-          def rw_perm_decl(m):
-              tag, before, name, after = m.group(1), m.group(2), m.group(3), m.group(4)
-              if name == OLD or name.startswith(OLD + "."):
-                  counts["perm_decl" if tag == "permission" else "perm_use"] += 1
-                  return f'<{tag}{before}android:name="{NEW + name[len(OLD):]}"{after}'
-              return m.group(0)
-          content = re.sub(
-              r'<(permission|uses-permission)([^>]*?)android:name="([^"]*)"([^>]*)',
-              rw_perm_decl, content,
-          )
-
-          # 4. android:permission= refs.
-          def rw_perm_ref(m):
-              v = m.group(1)
-              if v == OLD or v.startswith(OLD + "."):
-                  counts["perm_ref"] += 1
-                  return f'android:permission="{NEW + v[len(OLD):]}"'
-              return m.group(0)
-          content = re.sub(r'android:permission="([^"]*)"', rw_perm_ref, content)
-
-          # 5. android:targetPackage (instrumentation).
-          def rw_target(m):
-              if m.group(1) == OLD:
-                  counts["target_pkg"] += 1
-                  return f'android:targetPackage="{NEW}"'
-              return m.group(0)
-          content = re.sub(r'android:targetPackage="([^"]*)"', rw_target, content)
-
-          with open(path, "w", encoding="utf-8") as f:
-              f.write(content)
-          print(f"Manifest rewrites: {counts}")
-          if counts["package"] != 1:
-              print(f"ERROR: expected exactly 1 <manifest package=\"{OLD}\"> rename, got {counts['package']}", file=sys.stderr)
-              sys.exit(1)
-
-          # Verify no authority still references OLD as a token.
-          stale = []
-          for m in re.finditer(r'android:authorities="([^"]*)"', content):
-              for auth in m.group(1).split(";"):
-                  if OLD in auth and NEW not in auth:
-                      stale.append(auth)
-          if stale:
-              print(f"ERROR: authorities still reference {OLD}:", file=sys.stderr)
-              for a in sorted(set(stale)):
-                  print(f"  {a}", file=sys.stderr)
-              sys.exit(1)
-          print("Authority rewrite verification: OK")
-          PYEOF
-
-          echo ""
-          echo "Manifest authorities after rewrite:"
-          grep -oE 'android:authorities="[^"]*"' apktool_out/AndroidManifest.xml | sort -u | sed 's/^/  /'
-
-          # 6. Suffix the launcher label so the home-screen icon for the
-          # renamed install reads "GameHub Lite (5.3.5)" / similar, so it
-          # can be told apart from a canonical install at a glance.
-          if [ -f apktool_out/res/values/strings.xml ]; then
-            sed -i -E 's|(<string name="app_name">)([^<]*)(</string>)|\1\2 (5.3.5)\3|' \
-              apktool_out/res/values/strings.xml
-            echo "app_name suffixed with (5.3.5)"
-          fi
 
       - name: Build libevshim.so (guest-side SDL keepalive)
         run: |
@@ -318,8 +156,7 @@ jobs:
 
           # Compile vibration extension Java + d8 to classes<N>.dex, where
           # <N> is the next free dex slot after the rebuilt APK's stock dex
-          # files. (6.0.x has 6 stock dex files → classes7; 5.3.5 has 11
-          # stock dex files → classes12.)
+          # files. (6.0.x has 6 stock dex files → classes7.)
           ANDROID_JAR=$(ls $ANDROID_SDK_ROOT/platforms/android-*/android.jar 2>/dev/null | sort -V | tail -1)
           mkdir -p ext_classes
           javac -source 8 -target 8 -cp "$ANDROID_JAR" -d ext_classes \
@@ -347,21 +184,15 @@ jobs:
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/zipalign -f -v 4 \
               rebuilt-unsigned.apk rebuilt-aligned.apk
 
-          # Sign with the repo's testkey. Suffix output name with "-sbs"
-          # when the build was renamed for side-by-side install so the
-          # canonical and SBS artifacts don't collide if you build both.
-          SBS_SUFFIX=""
-          if [ "${{ steps.base.outputs.side_by_side }}" = "true" ]; then
-            SBS_SUFFIX="-sbs"
-          fi
-          OUT="GameHub-Vibration-Fix-${{ steps.base.outputs.version }}${SBS_SUFFIX}.apk"
+          # Sign with the repo's testkey.
+          OUT="GameHub-Vibration-Fix-${{ steps.base.outputs.version }}.apk"
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/apksigner sign \
               --key testkey.pk8 --cert testkey.x509.pem \
               --out "$OUT" \
               rebuilt-aligned.apk
           ls -lh "$OUT"
           echo "out_apk=$OUT" >> "$GITHUB_ENV"
-          echo "out_artifact=GameHub-Vibration-Fix-${{ steps.base.outputs.version }}${SBS_SUFFIX}" >> "$GITHUB_ENV"
+          echo "out_artifact=GameHub-Vibration-Fix-${{ steps.base.outputs.version }}" >> "$GITHUB_ENV"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

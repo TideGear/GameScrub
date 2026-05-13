@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
 Apply login-bypass patches to a decompiled GameHub apktool tree.
-Supports stock 5.3.5 and 6.0.2.
+Supports stock 6.0.2 and 6.0.4.
 
 Effect: make the app's "is logged in" gate report true unconditionally
 so the launcher Activity proceeds straight to the home screen instead
-of routing through the login screen. The privacy-policy text in
-stock GameHub lives inline on the login screen footer (there is no
-separate first-launch privacy dialog in 5.3.5 / 6.0.2), so bypassing
-the login screen also takes the privacy popup with it.
+of routing through the login screen, and short-circuit the
+SharedPreferences read for "app_agreement_agreed" so the splash's
+privacy-policy popup never fires.
 
-6.0.2 mechanism
----------------
+Mechanism (6.0.x)
+-----------------
 The "is logged in" state is a Compose StateFlow<Boolean> exposed by
 the auth state holder `Lit0;` (field `c`, returned by `it0.h()`). The
 StateFlow is derived from a combine() of two upstream flows:
@@ -20,50 +19,26 @@ StateFlow is derived from a combine() of two upstream flows:
     token = authTokenDao.observeCurrent() -> StateFlow<AuthTokenEntity?>
     isLoggedIn = combine(user, token) { u, t -> u != null && t != null }
 
-The combine lambda is class `Ldt0;` (extends SuspendLambda, implements
-Function3). Its `invokeSuspend()` returns `Boolean.valueOf(user != null
-&& token != null)`. We rewrite the body to always return
-`Boolean.TRUE`, which makes every downstream observer (including the
-Compose start-destination selector that picks home-vs-login) see the
-user as authenticated.
+The combine lambda (extends SuspendLambda, implements Function3) has
+its `invokeSuspend()` rewritten to always return `Boolean.TRUE`, which
+makes every downstream observer (including the Compose start-
+destination selector that picks home-vs-login) see the user as
+authenticated.
+
+Separately, the splash screen reads `app_agreement_agreed` from
+SharedPreferences via a thin wrapper class with `e(String, Z)Z`. We
+patch the wrapper to short-circuit that one key to `true`; all other
+keys fall through to the original `getBoolean()` logic, so unrelated
+boolean prefs are untouched.
 
 Locator strategy — by signature, not by class name
 --------------------------------------------------
-The class name `dt0` is R8-obfuscated and shifts between minor
-6.0.x releases. Rather than hardcode it, we scan all `smali_classes4/`
-files for a class that has:
-  - Two synthetic instance fields `L$0:Ljava/lang/Object;` and
-    `L$1:Ljava/lang/Object;` (the captured args of a 2-input combine
-    lambda).
-  - A NON-suspending `invokeSuspend()` body: it must do its
-    null-checks + Boolean boxing in a single straight-line block.
-    Concretely: exactly one `Boolean.valueOf(Z)` call, no
-    `iput-object …, …, L$[01]:` writes inside invokeSuspend (writes
-    indicate state-machine resumption, which the simple auth
-    combiner doesn't need), and a tight `.locals` budget (≤4).
-  - Body length under ~2 KB — auth combiner is ~1.3 KB. Larger
-    matches are state-machine-laden combine lambdas elsewhere
-    (e.g. media-focus combiners that capture many fields).
-This signature is distinctive enough that exactly one class matches
-on stock 6.0.2 (the auth-state combiner). If zero or more than one
-match, the script bails out with a clear error rather than guessing.
-
-5.3.5 mechanism
----------------
-Auth state is held by a non-obfuscated Kotlin singleton at a fixed
-path (`Lcom/xj/common/user/UserManager;` under
-`smali_classes8/com/xj/common/user/`). Five method-body replacements
-do the bypass: `isLogin()Z` always returns true, and `getUid` /
-`getUsername` / `getNickname` / `getAvatar` return synthetic
-constants so any consumer reading them gets benign values instead
-of empties from a never-completed login. Approach lifted from
-playday3008/gamehub-patches PR #13.
-
-Usage:
-    python3 apply_login_bypass.py <apktool_decompile_dir>
-
-Fails fast: exits non-zero if the bypass target can't be unambiguously
-identified.
+Both the auth-state combiner and the preference wrapper are
+R8-obfuscated to two- or three-letter class names that shift between
+minor 6.0.x releases (e.g. 6.0.2 `dt0`/`dyj`, 6.0.4 `et0`/`kyj`).
+Rather than hardcode names, we scan `smali_classes4/` for the
+distinctive signatures and bail with a clear error if zero or more
+than one class matches.
 """
 import re
 import sys
@@ -147,8 +122,6 @@ def detect_version(root: Path) -> str:
     if (root / "smali_classes3/ab8.smali").is_file() \
             and (root / "smali_classes3/bg5.smali").is_file():
         return "6.0.4"
-    if (root / "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali").is_file():
-        return "5.3.5"
     return "unknown"
 
 
@@ -376,364 +349,6 @@ def patch_6x_privacy(root: Path) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# 5.3.5 login bypass
-# ---------------------------------------------------------------------------
-#
-# Unlike 6.0.x, 5.3.5 ships UserManager with un-obfuscated symbols at a
-# fixed path. The class is a Kotlin singleton with public-final getters
-# (isLogin, getUid, getUsername, getNickname, getAvatar, getToken, ...).
-# Every gate across the app routes through `UserManager.isLogin()Z` and
-# the launcher's start destination is selected from it; replacing the
-# body to `return true` makes the gate accept the user as signed-in and
-# skips the login screen entirely (Google sign-in / email verification
-# code / etc. — none of those flows ever execute).
-#
-# The other four getters are stubbed to synthetic values so any UI code
-# that reads them while the dialog/profile sheet is open gets benign
-# strings/integers instead of empty values that could trip downstream
-# null/length checks.
-#
-# Approach lifted from playday3008/gamehub-patches PR #13's
-# BypassLoginPatch. We do five method-body replacements on
-# Lcom/xj/common/user/UserManager; — find each by exact-signature regex
-# in a single text pass, replace, write back.
-
-UM_PATH = "smali_classes8/com/xj/common/user/UserManager.smali"
-
-# Each entry: (method signature line, new full method body). Smali
-# `.locals 1` is enough for every replacement — they all just load one
-# constant and return.
-USERMANAGER_PATCHES = {
-    "isLogin()Z": """.method public final isLogin()Z
-    .locals 1
-
-    # BH: login bypass - always report logged-in so the launcher
-    # skips the login Activity. Replaces stock body that checked
-    # `getToken().length > 0 && getUid() >= 0`.
-    const/4 v0, 0x1
-    return v0
-.end method""",
-    "getUid()I": """.method public final getUid()I
-    .locals 1
-
-    # BH: login bypass - synthetic uid (large positive constant so
-    # `getUid() >= 0` checks pass everywhere).
-    const v0, 0x1869f
-    return v0
-.end method""",
-    "getUsername()Ljava/lang/String;": """.method public final getUsername()Ljava/lang/String;
-    .locals 1
-
-    # BH: login bypass - synthetic username.
-    const-string v0, "Local"
-    return-object v0
-.end method""",
-    "getNickname()Ljava/lang/String;": """.method public final getNickname()Ljava/lang/String;
-    .locals 1
-
-    # BH: login bypass - synthetic display name.
-    const-string v0, "Local Player"
-    return-object v0
-.end method""",
-    "getAvatar()Ljava/lang/String;": """.method public final getAvatar()Ljava/lang/String;
-    .locals 1
-
-    # BH: login bypass - empty avatar URL. UI falls back to a
-    # default avatar drawable when this is empty.
-    const-string v0, ""
-    return-object v0
-.end method""",
-}
-
-
-def patch_535(root: Path) -> None:
-    """5.3.5 login bypass has two halves:
-
-    1) Replace 5 UserManager getters with synthetic constants so the
-       launcher's startup gate sees the user as logged-in (skips
-       GuideLoginActivity).
-    2) Bypass the guide-step validator (RouterUtils.checkGuideStep$1
-       + RouterUtils.n / .z) so the post-login privacy popup +
-       create-avatar wizard + periodic session-validity recheck are
-       all short-circuited. Without (2) the app reaches home briefly,
-       then `checkGuideStep` fires, the synthetic session fails the
-       server-side validation, and RouterUtils.z routes back to login
-       with the "Your session has expired" toast.
-
-    Lift from playday3008/gamehub-patches PR #13's BypassLoginPatch +
-    bypassTokenExpiryPatch.
-    """
-    target = root / UM_PATH
-    if not target.is_file():
-        print(
-            f"ERROR: UserManager not found at {UM_PATH}. Is this really a "
-            "stock 5.3.5 apktool tree?",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    print(f"Found UserManager: {target.relative_to(root)}")
-
-    src = target.read_text(encoding="utf-8")
-    out = src
-    for sig, new_body in USERMANAGER_PATCHES.items():
-        method_re = re.compile(
-            r'\.method public final '
-            + re.escape(sig)
-            + r'\n.*?\.end method',
-            re.DOTALL,
-        )
-        m = method_re.search(out)
-        if not m:
-            print(
-                f"ERROR: method `public final {sig}` not found in {target.name} "
-                "(stock signature may have shifted between minor 5.3.5 builds)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        out = out[:m.start()] + new_body + out[m.end():]
-        print(f"OK: rewrote UserManager.{sig} -> synthetic constant")
-
-    target.write_text(out, encoding="utf-8")
-
-    patch_535_guide_bypass(root)
-
-
-# ---------------------------------------------------------------------------
-# 5.3.5 guide-step / token-expiry bypass
-# ---------------------------------------------------------------------------
-
-ROUTER_UTILS_PATH = "smali_classes8/com/xj/landscape/launcher/router/RouterUtils.smali"
-CHECK_GUIDE_PATH = "smali_classes8/com/xj/landscape/launcher/router/RouterUtils$checkGuideStep$1.smali"
-SPLASH_ACTIVITY_PATH = "smali_classes8/com/xj/app/SplashActivity.smali"
-
-# n()V and z()V both early-return with no side effects. n() is the
-# debounced "schedule a guide-step recheck"; z() is the activity-stack
-# clear + relaunch GuideLoginActivity routine. With both stubbed out,
-# the periodic recheck timer never fires and the session-expired
-# branch (when reached) never restarts the login Activity.
-ROUTER_NOOP_METHODS = {
-    "n()V": """.method public n()V
-    .locals 0
-
-    # BH: login bypass - no-op the guide-step recheck timer entry so
-    # the synthetic session is never re-validated against the server.
-    return-void
-.end method""",
-    "z()V": """.method public final z()V
-    .locals 0
-
-    # BH: login bypass - no-op the relaunch-to-login routine so a
-    # 401 anywhere never kicks the user back to GuideLoginActivity.
-    return-void
-.end method""",
-}
-
-
-def patch_535_guide_bypass(root: Path) -> None:
-    # 1. Stub n() and z() on RouterUtils.
-    ru = root / ROUTER_UTILS_PATH
-    if not ru.is_file():
-        print(
-            f"ERROR: RouterUtils not found at {ROUTER_UTILS_PATH}.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    print(f"Found RouterUtils: {ru.relative_to(root)}")
-    src = ru.read_text(encoding="utf-8")
-    out = src
-    for sig, new_body in ROUTER_NOOP_METHODS.items():
-        # Match `.method public[ final] <sig>` so the regex picks up
-        # whichever modifiers stock uses (n() is `public`, z() is
-        # `public final`).
-        method_re = re.compile(
-            r'\.method public(?: final)? '
-            + re.escape(sig)
-            + r'\n.*?\.end method',
-            re.DOTALL,
-        )
-        m = method_re.search(out)
-        if not m:
-            print(
-                f"ERROR: method `public[ final] {sig}` not found in "
-                f"{ru.name}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        out = out[:m.start()] + new_body + out[m.end():]
-        print(f"OK: stubbed RouterUtils.{sig} -> return-void")
-    ru.write_text(out, encoding="utf-8")
-
-    # 2. Inject playday3008's exact bypassTokenExpiryPatch into
-    # checkGuideStep$1.invokeSuspend: after the XjLog.h debug call,
-    # insert (const/4 v4, 0x0; const/high16 v3, 0x10000000; goto/16
-    # :skip_guide_check) and place :skip_guide_check ON the next
-    # sget-object DeviceManager.a instruction (which is the start of
-    # the success branch).
-    #
-    # The two const-loads before the goto are CRITICAL for verifier
-    # correctness:
-    #   - v4 must be primitive int at the target; the natural-flow
-    #     path reaches the target with v4 = int 0 (post-const/4).
-    #   - v3 must be primitive int holding 0x10000000 at the target;
-    #     the natural-flow path loads that into v3 just before the
-    #     sget-object as a FLAG_ACTIVITY_NEW_TASK constant the
-    #     DeviceManager block immediately consumes.
-    # Without these the verifier rejects the merge at :cond_8
-    # because the goto path leaves v3/v4 with whatever types they
-    # had post-XjLog.h (Ref$BooleanRef + Ref$ObjectRef typically),
-    # which can't unify with the primitive ints the fall-through
-    # path has. That's the source of the two earlier VerifyErrors.
-    #
-    # Crucially we INSERT after XjLog.h (don't replace anything),
-    # so the original iget-boolean / const/4 / if-nez sequence
-    # remains in the bytecode but is dead code after the goto.
-    # Doing it this way also keeps the original method's "label"
-    # state machine intact: the suspend coroutine's `label` field
-    # is still checked, the original return-paths exist for the
-    # state-machine machinery, we just route execution past them.
-    cg = root / CHECK_GUIDE_PATH
-    if not cg.is_file():
-        print(
-            f"ERROR: checkGuideStep$1 not found at {CHECK_GUIDE_PATH}.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    print(f"Found checkGuideStep$1: {cg.relative_to(root)}")
-    src = cg.read_text(encoding="utf-8")
-
-    # Anchor: the XjLog.h call. We insert immediately after this.
-    log_anchor = (
-        '    const-string v5, "checkGuideStep"\n'
-        '\n'
-        '    .line 183\n'
-        '    .line 184\n'
-        '    invoke-static {v5, p1}, Lcom/xj/common/utils/XjLog;'
-        '->h(Ljava/lang/String;Ljava/lang/String;)V\n'
-    )
-    if log_anchor not in src:
-        print(
-            "ERROR: checkGuideStep$1 XjLog.h anchor not found - stock "
-            "smali for the validator suspend lambda may have shifted.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Target: place label on the sget-object DeviceManager.a
-    # instruction (the start of the "all guide steps passed -> check
-    # device" branch). Preserve :cond_8 immediately before so other
-    # branches that target :cond_8 still resolve correctly.
-    dm_anchor = (
-        '    :cond_8\n'
-        '    sget-object p1, '
-        'Lcom/xj/bussiness/devicemanagement/utils/DeviceManager;'
-        '->a:Lcom/xj/bussiness/devicemanagement/utils/DeviceManager;\n'
-    )
-    if dm_anchor not in src:
-        print(
-            "ERROR: checkGuideStep$1 DeviceManager.a anchor not found "
-            "- skip-target label can't be placed.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    # Insert the three-instruction skip block AFTER the XjLog.h call.
-    # The original code after XjLog.h (iget-boolean, const/4 v4,
-    # if-nez, ...) stays in the file but becomes dead code, which
-    # the verifier accepts because it's still type-consistent in
-    # isolation.
-    inserted = (
-        log_anchor
-        + '\n'
-        + '    # BH: login bypass (port of playday3008 PR #13\n'
-        + '    # bypassTokenExpiryPatch). Pre-set v4 = 0 and\n'
-        + '    # v3 = FLAG_ACTIVITY_NEW_TASK so the verifier accepts\n'
-        + '    # the type merge at :bh_skip_guide_check, then jump\n'
-        + '    # past the entire validator body to the\n'
-        + '    # DeviceManager.A() success branch.\n'
-        + '    const/4 v4, 0x0\n'
-        + '    const/high16 v3, 0x10000000\n'
-        + '    goto/16 :bh_skip_guide_check\n'
-    )
-    src = src.replace(log_anchor, inserted, 1)
-
-    # Place the label right before :cond_8 / the sget-object so the
-    # goto lands at the start of the DeviceManager.a success block.
-    labelled = (
-        '    :bh_skip_guide_check\n'
-        + dm_anchor
-    )
-    src = src.replace(dm_anchor, labelled, 1)
-
-    cg.write_text(src, encoding="utf-8")
-    print(
-        "OK: injected goto/16 :bh_skip_guide_check in "
-        "checkGuideStep$1.invokeSuspend with v3/v4 pre-init "
-        "(verifier-compatible)"
-    )
-
-    # 3. Privacy-popup bypass. SplashActivity.p1() shows the User
-    # Agreement + Privacy Policy dialog at first launch and only
-    # skips it if SPUtils.getInt("uminit", 0) == 1. The guard is:
-    #
-    #     move-result v1            # v1 = SPUtils.getInt("uminit", 0)
-    #     const/4 v2, 0x1
-    #     if-eq v1, v2, :cond_0     # skip popup if uminit == 1
-    #     [...show popup, return-void...]
-    #     :cond_0
-    #     invoke-virtual {p0}, ...->m1()V   # post-agreement init
-    #     invoke-virtual {p0}, ...->o1()V
-    #     return-void
-    #
-    # Replacing the if-eq with an unconditional `goto :cond_0` makes
-    # the post-agreement path the only one ever taken; the popup
-    # creation block below it becomes dead code (verifier OK with
-    # that). m1()/o1() run as normal so any splash initialization
-    # they do isn't lost.
-    sp = root / SPLASH_ACTIVITY_PATH
-    if not sp.is_file():
-        print(
-            f"ERROR: SplashActivity not found at {SPLASH_ACTIVITY_PATH}.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    print(f"Found SplashActivity: {sp.relative_to(root)}")
-    src = sp.read_text(encoding="utf-8")
-
-    # Anchor: the const/4 v2, 0x1 + if-eq pair right after the
-    # SPUtils.getInt return. Unique enough — there's only one
-    # if-eq immediately following const/4 v2, 0x1 in p1().
-    popup_anchor = (
-        '    const/4 v2, 0x1\n'
-        '\n'
-        '    .line 15\n'
-        '    if-eq v1, v2, :cond_0\n'
-    )
-    if popup_anchor not in src:
-        print(
-            "ERROR: SplashActivity.p1() if-eq guard anchor not found.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    popup_patched = (
-        '    const/4 v2, 0x1\n'
-        '\n'
-        '    .line 15\n'
-        '    # BH: privacy-popup bypass - always treat the user as\n'
-        '    # having accepted the agreement (SPUtils "uminit" key\n'
-        '    # would otherwise be 0 on a fresh install and gate this).\n'
-        '    # The popup-creation code below becomes dead code; m1()\n'
-        '    # and o1() at :cond_0 still run for splash init.\n'
-        '    goto :cond_0\n'
-    )
-    src = src.replace(popup_anchor, popup_patched, 1)
-    sp.write_text(src, encoding="utf-8")
-    print(
-        "OK: rewrote SplashActivity.p1() if-eq guard -> goto :cond_0 "
-        "(privacy popup unreachable)"
-    )
-
-
 def main():
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -748,8 +363,6 @@ def main():
     if version in ("6.0.2", "6.0.4"):
         patch_6x(root)
         patch_6x_privacy(root)
-    elif version == "5.3.5":
-        patch_535(root)
     else:
         print(
             f"ERROR: don't know how to bypass login on version '{version}'.",

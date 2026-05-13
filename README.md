@@ -8,11 +8,11 @@
 > GOG store integration, Component Manager, RTS touch controls, HUD
 > overlays, root access management, frontend export, etc.), use BannerHub
 > upstream — that's the real project. This fork is a deliberate strip-down
-> of just the vibration mod, supporting stock 5.3.5, 6.0.2, and 6.0.4 base APKs.
+> of just the vibration mod, supporting stock 6.0.2 and 6.0.4 base APKs.
 
-A minimal patch on top of stock GameHub (5.3.5, 6.0.2, or 6.0.4) that
-adds **PC-accurate XInput rumble support** for Wine games. Nothing else
-is changed. This is for the sake of having the working achievements of
+A minimal patch on top of stock GameHub (6.0.2 or 6.0.4) that adds
+**PC-accurate XInput rumble support** for Wine games. Nothing else is
+changed. This is for the sake of having the working achievements of
 stock GameHub plus fixed vibration.
 
 What you get over stock GameHub:
@@ -28,18 +28,12 @@ What you get over stock GameHub:
   2 s duration so the timer never fires.
 - **Instant release** when the game stops rumble — no phantom-suppression
   timer extending the motor past the actual stop call.
-- **Multi-controller wake-up (5.3.5 only).** A connect-time hook fires a
-  button-14 flicker on each newly-connected slot's `GamepadState` so
-  libvfs's lazy `SDL_JOYDEVICEADDED` lands before the user provides input.
-  Without it, the second/Nth controller's rumble silently no-ops on 5.3.5
-  until you press a button. 6.0.x doesn't need this — the gamepad-
-  subsystem refactor in the 6.0 line fixed lazy-attach natively.
 
 ## Build
 
 CI workflow: `.github/workflows/build.yml` — triggers on `workflow_dispatch`
-(pick base version 5.3.5 / 6.0.2 / 6.0.4) or push of a `v*-5.3.5*` /
-`v*-6.0.2*` / `v*-6.0.4*` tag.
+(pick base version 6.0.2 / 6.0.4) or push of a `v*-6.0.2*` / `v*-6.0.4*`
+tag.
 
 One-time setup per base version: upload the original GameHub APK as an
 asset on a release tagged `base-apk-<version>` in this repo (e.g.
@@ -50,8 +44,6 @@ was triggered against.
 `scripts/apply_vibration_patches.py` auto-detects the base version from
 the smali layout of the decompiled tree:
 
-- **5.3.5** ships unobfuscated symbols — anchors live under
-  `smali_classes7/com/winemu/core/{controller,gamepad}/`.
 - **6.0.2** uses ProGuard names `za8` (Physical), `dg5` (env builder),
   `ns2.I0` (joinToString helper).
 - **6.0.4** renames those to `ab8`, `bg5`, `ps2.I0` respectively.
@@ -63,54 +55,23 @@ The pipeline:
 1. `apktool d` the base APK
 2. Strip `android:usesPermissionFlags` and
    `android:enableOnBackInvokedCallback` from the manifest (apktool 2.9.3's
-   bundled aapt2 doesn't know them; cosmetic, harmless on 6.0.x — no-op
-   on 5.3.5 where these attributes don't exist)
-3. `python3 scripts/apply_vibration_patches.py` — four smali hooks on
-   6.0.x, five on 5.3.5 (extra connect-time wake-up)
+   bundled aapt2 doesn't know them; cosmetic, harmless)
+3. `python3 scripts/apply_vibration_patches.py` — four smali hooks
 4. (optional) `python3 scripts/apply_login_bypass.py` — patch the
-   auth-state combiner + privacy-popup gate (6.0.x) or UserManager
-   getters + RouterUtils guide-step bypass + SplashActivity.p1()
-   privacy guard (5.3.5)
-5. (optional 5.3.5 only) rename package to `gamehub.v535` for side-by-
-   side install (see below) — direct manifest edit, no apktool
-   `renameManifestPackage` (mirrors BannerHub's `gamehub.lite` recipe)
-6. `cmake/ninja` build of `native/evshim/libevshim.so` for arm64-v8a
-7. `apktool b`
-8. `javac + d8` of the two `extension/Bh*.java` files → next free
-   `classesN.dex` slot (classes7 on 6.0.x, classes12 on 5.3.5), inject
-   into the APK
-9. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
-10. Upload as `GameHub-Vibration-Fix-<version>.apk`
-
-### Side-by-side install
-
-5.3.5 and 6.0.x both ship as `package com.xiaoji.egggame` upstream, so
-only one can be installed at a time without intervention. There's a
-`side_by_side` workflow_dispatch boolean (5.3.5 only — ignored on
-6.0.x and on tag-triggered builds) that renames the 5.3.5 build to
-`package gamehub.v535` with all FileProvider authorities and custom
-permission names rewritten under the new prefix, the launcher label
-suffixed `(5.3.5)`, and the output APK named
-`GameHub-Vibration-Fix-5.3.5-sbs.apk` so it doesn't collide with the
-canonical artifact.
-
-When both `GameHub-Vibration-Fix-5.3.5-sbs.apk` (renamed) and
-`GameHub-Vibration-Fix-6.0.4.apk` (canonical) are installed, each gets
-its own `/data/data/` directory (separate Wine prefix, separate Steam
-install, no shared game library).
-
-Mirrors BannerHub upstream's `gamehub.lite` recipe — the rename is a
-direct text-manifest edit, not apktool's `renameManifestPackage`
-(which leaves authorities pointing at the old package and trips
-runtime authority-collision failures).
+   auth-state combiner + privacy-popup gate
+5. `cmake/ninja` build of `native/evshim/libevshim.so` for arm64-v8a
+6. `apktool b`
+7. `javac + d8` of the two `extension/Bh*.java` files → next free
+   `classesN.dex` slot (classes7), inject into the APK
+8. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
+9. Upload as `GameHub-Vibration-Fix-<version>.apk`
 
 ## Project layout
 
 ```
 extension/
   BhVibrationController.java       singleton dispatcher (smali entry points,
-                                   per-game settings, keepalive thread,
-                                   5.3.5 connect-time wake-up)
+                                   per-game settings, keepalive thread)
   BhVibrationSettingsActivity.java Mode/Intensity dialog UI
 
 native/evshim/
@@ -118,13 +79,11 @@ native/evshim/
                                    winebus.so's pSDL_JoystickRumble +
                                    pSDL_JoystickClose .bss pointers so
                                    sustained rumble survives SDL's 1 s
-                                   auto-expiry. Also writes the
-                                   .bh_winedevice_ready marker the host's
-                                   wake-up watcher gates on (5.3.5).
+                                   auto-expiry.
 
 scripts/
   apply_vibration_patches.py       smali hooks against a decompiled
-                                   apktool tree (5.3.5 or 6.0.2;
+                                   apktool tree (6.0.2 or 6.0.4;
                                    version auto-detected from layout).
 
 .github/workflows/build.yml        CI build pipeline.
