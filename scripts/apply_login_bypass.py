@@ -144,6 +144,9 @@ def detect_version(root: Path) -> str:
     if (root / "smali_classes3/za8.smali").is_file() \
             and (root / "smali_classes3/dg5.smali").is_file():
         return "6.0.2"
+    if (root / "smali_classes3/ab8.smali").is_file() \
+            and (root / "smali_classes3/bg5.smali").is_file():
+        return "6.0.4"
     if (root / "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali").is_file():
         return "5.3.5"
     return "unknown"
@@ -742,7 +745,7 @@ def main():
 
     version = detect_version(root)
     print(f"Detected GameHub base version: {version}")
-    if version == "6.0.2":
+    if version in ("6.0.2", "6.0.4"):
         patch_6x(root)
         patch_6x_privacy(root)
     elif version == "5.3.5":

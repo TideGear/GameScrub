@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Apply PC-accurate vibration patches to a decompiled GameHub apktool tree.
-Supports stock 5.3.5 and 6.0.2 — version is auto-detected from the smali
-class layout.
+Supports stock 5.3.5, 6.0.2, and 6.0.4 — version is auto-detected from
+the smali class layout.
 
 Hooks (5.3.5 has one extra; 6.0.2 dropped it because the gamepad subsystem
 refactor in the 6.0 line fixed the underlying lazy-attach issue natively):
@@ -69,6 +69,10 @@ VERSION_PROBES = {
         "smali_classes3/za8.smali",
         "smali_classes3/dg5.smali",
     ),
+    "6.0.4": (
+        "smali_classes3/ab8.smali",
+        "smali_classes3/bg5.smali",
+    ),
 }
 
 
@@ -118,6 +122,14 @@ RENAMES_6X = {
         "join_cls": "ns2",     # CollectionsKt joinTo helper
         "join_method": "I0",   # joinToString$default
         "join_lambda": "ow6",  # Function1 lambda parameter type
+    },
+    "6.0.4": {
+        "physical": "ab8",
+        "physical_k": "xrl",
+        "envbuilder": "bg5",
+        "join_cls": "ps2",
+        "join_method": "I0",
+        "join_lambda": "pw6",
     },
 }
 

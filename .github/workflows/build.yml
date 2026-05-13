@@ -5,35 +5,37 @@ name: Build APK
 # rumble keepalive on top of stock GameHub. Otherwise unchanged from
 # upstream Tencent build.
 #
-# Supports stock 5.3.5 and 6.0.2 (apply_vibration_patches.py auto-detects
-# the version from the smali layout of the decompiled tree).
+# Supports stock 5.3.5, 6.0.2, and 6.0.4 (apply_vibration_patches.py
+# auto-detects the version from the smali layout of the decompiled tree).
 #
 # Setup once per base version: upload the original GameHub APK as an
 # asset on a release tagged `base-apk-<version>` in this repo (e.g.
-# `base-apk-6.0.2`). The workflow `gh release download`s from there.
+# `base-apk-6.0.4`). The workflow `gh release download`s from there.
 
 on:
   push:
     tags:
       - 'v*-5.3.5*'
       - 'v*-6.0.2*'
+      - 'v*-6.0.4*'
   workflow_dispatch:
     inputs:
       base_version:
         description: 'Stock GameHub version to patch (must have a base-apk-<version> release).'
         required: true
-        default: '6.0.2'
+        default: '6.0.4'
         type: choice
         options:
+          - '6.0.4'
           - '6.0.2'
           - '5.3.5'
       bypass_login:
-        description: 'Bypass the GameHub login screen. 6.0.2 also bypasses the splash privacy popup. 5.3.5 only has the login screen (no separate privacy modal).'
+        description: 'Bypass the GameHub login screen. 6.0.x also bypasses the splash privacy popup. 5.3.5 has its own privacy bypass + guide-step skip.'
         required: false
         default: false
         type: boolean
       side_by_side:
-        description: 'Rename 5.3.5 package to gamehub.v535 so it installs alongside a canonical 6.0.2. Ignored on 6.0.2.'
+        description: 'Rename 5.3.5 package to gamehub.v535 so it installs alongside a canonical 6.0.x. Ignored on 6.0.x.'
         required: false
         default: false
         type: boolean
@@ -53,12 +55,12 @@ jobs:
         run: |
           # workflow_dispatch → use the chosen input.
           # tag push        → parse the version out of the tag
-          #                   (e.g. v1.2-6.0.2 → 6.0.2).
+          #                   (e.g. v1.2-6.0.4 → 6.0.4).
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VER="${{ inputs.base_version }}"
           else
             REF="${GITHUB_REF#refs/tags/}"
-            VER="$(echo "$REF" | sed -nE 's/.*-(5\.3\.5|6\.0\.2).*/\1/p')"
+            VER="$(echo "$REF" | sed -nE 's/.*-(5\.3\.5|6\.0\.2|6\.0\.4).*/\1/p')"
           fi
           if [ -z "$VER" ]; then
             echo "ERROR: could not resolve base version from event=${{ github.event_name }} ref=${GITHUB_REF}" >&2
@@ -68,7 +70,7 @@ jobs:
           # Side-by-side rename is opt-in via workflow_dispatch only.
           # `inputs.side_by_side` is empty for tag-push events, which
           # evaluates to false → tag-driven release builds keep the
-          # canonical package. Only meaningful on 5.3.5; ignored on 6.0.2.
+          # canonical package. Only meaningful on 5.3.5; ignored on 6.0.x.
           SBS_FLAG="false"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
               && [ "${{ inputs.side_by_side }}" = "true" ] \
@@ -124,9 +126,9 @@ jobs:
 
       - name: Apply BhVibration smali patches
         run: |
-          # apply_vibration_patches.py auto-detects 5.3.5 or 6.0.2 from
-          # the smali layout of the decompiled tree. Per-version anchor
-          # set + rename maps live at the top of that script.
+          # apply_vibration_patches.py auto-detects 5.3.5 / 6.0.2 / 6.0.4
+          # from the smali layout of the decompiled tree. Per-version
+          # anchor set + rename maps live at the top of that script.
           python3 scripts/apply_vibration_patches.py apktool_out
 
       - name: Apply login bypass (optional)
