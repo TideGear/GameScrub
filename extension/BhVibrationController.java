@@ -17,6 +17,8 @@ import android.util.Log;
 import android.view.InputDevice;
 
 import java.io.File;
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -133,6 +135,30 @@ public final class BhVibrationController {
     private static final long RUMBLE_KEEPALIVE_MS = 1500L;     // refresh controller before 2s expiry
 
     private static volatile BhVibrationController INSTANCE;
+
+    private static final AtomicBoolean WINEBUS_DURATION_PATCH_ATTEMPTED = new AtomicBoolean(false);
+    private static final int WINEBUS_SCAN_MAX_DEPTH = 16;
+    private static final int WINEBUS_SCAN_MAX_FILES = 100000;
+    private static final long WINEBUS_PATCH_MAX_BYTES = 16L * 1024L * 1024L;
+    private static final byte[] WINEBUS_ELF_MAGIC = new byte[] {
+            0x7f, 0x45, 0x4c, 0x46
+    };
+    private static final byte[] WINEBUS_RUMBLE_STRING = new byte[] {
+            0x53, 0x44, 0x4c, 0x5f, 0x4a, 0x6f, 0x79, 0x73,
+            0x74, 0x69, 0x63, 0x6b, 0x52, 0x75, 0x6d, 0x62,
+            0x6c, 0x65
+    };
+    private static final byte[] WINEBUS_ORIGINAL_SITE = new byte[] {
+            (byte) 0xa3, (byte) 0xc3, 0x5e, (byte) 0xb8,  // ldur w3, [x29, #-0x14]
+            0x00, 0x01, 0x3f, (byte) 0xd6                 // blr x8
+    };
+    private static final byte[] WINEBUS_PATCHED_SITE = new byte[] {
+            0x03, 0x00, (byte) 0x80, 0x12,                // mov w3, #-1
+            0x00, 0x01, 0x3f, (byte) 0xd6                 // blr x8
+    };
+    private static final byte[] WINEBUS_PATCHED_LOAD = new byte[] {
+            0x03, 0x00, (byte) 0x80, 0x12
+    };
 
     public static BhVibrationController getInstance() {
         BhVibrationController local = INSTANCE;
@@ -491,14 +517,16 @@ public final class BhVibrationController {
     // Returning false here causes the smali helper to skip the
     // ArrayList.add() — libevshim is never added to LD_PRELOAD, the
     // dynamic linker never maps it into Wine subprocess address space,
-    // and the game launches normally. Tradeoff for the disabled game:
-    // SDL's 1 s rumble auto-expiry kicks in, so sustained rumble cuts
-    // at one second. Smali patches 1-3 still work (dual-motor dispatch +
-    // instant release).
+    // and the game launches normally. To keep sustained rumble working in
+    // those games, we also patch the app-owned winebus.so on disk so the
+    // nonzero SDL rumble start calls use a non-expiring duration. Smali
+    // patches 1-3 still work either way (dual-motor dispatch + instant
+    // release).
     // ─────────────────────────────────────────────────────────────────────────
     public static boolean shouldPreloadEvshim(Context ctx) {
         try {
             if (ctx == null) return true;
+            ensureWinebusDurationPatch(ctx);
             // Global override: <filesDir>/.bh_skip_evshim. Takes precedence
             // over per-game so users have a deterministic escape hatch for
             // the case where bg5.a() runs before WineActivity reaches the
@@ -528,6 +556,139 @@ public final class BhVibrationController {
             Log.w(TAG, "shouldPreloadEvshim failed — defaulting to enabled", t);
             return true;
         }
+    }
+
+    private static void ensureWinebusDurationPatch(Context ctx) {
+        if (!WINEBUS_DURATION_PATCH_ATTEMPTED.compareAndSet(false, true)) return;
+        try {
+            File root = ctx.getFilesDir();
+            if (root == null || !root.isDirectory()) {
+                Log.i(TAG, "winebus duration patch skipped: no files dir");
+                return;
+            }
+
+            int[] stats = new int[4]; // files visited, winebus found, patched, already patched
+            scanWinebusFiles(root, 0, stats);
+            Log.i(TAG, "winebus duration patch scan files=" + stats[0]
+                    + " winebus=" + stats[1]
+                    + " patched=" + stats[2]
+                    + " already=" + stats[3]);
+            if (stats[1] == 0) {
+                WINEBUS_DURATION_PATCH_ATTEMPTED.set(false);
+            }
+        } catch (Throwable t) {
+            WINEBUS_DURATION_PATCH_ATTEMPTED.set(false);
+            Log.w(TAG, "winebus duration patch scan failed", t);
+        }
+    }
+
+    private static void scanWinebusFiles(File file, int depth, int[] stats) {
+        if (file == null || depth > WINEBUS_SCAN_MAX_DEPTH || stats[0] >= WINEBUS_SCAN_MAX_FILES) {
+            return;
+        }
+
+        stats[0]++;
+        if (file.isDirectory()) {
+            if (shouldSkipWinebusScanDir(file)) return;
+            File[] children = file.listFiles();
+            if (children == null) return;
+            for (File child : children) {
+                if (stats[0] >= WINEBUS_SCAN_MAX_FILES) break;
+                scanWinebusFiles(child, depth + 1, stats);
+            }
+            return;
+        }
+
+        if (!"winebus.so".equals(file.getName())) return;
+        stats[1]++;
+        try {
+            int result = patchWinebusDurationFile(file);
+            if (result == 1) stats[2]++;
+            else if (result == 2) stats[3]++;
+        } catch (Throwable t) {
+            Log.w(TAG, "winebus duration patch failed for " + file.getAbsolutePath(), t);
+        }
+    }
+
+    private static boolean shouldSkipWinebusScanDir(File dir) {
+        String name = dir.getName();
+        return "Steam".equals(name)
+                || "steamapps".equals(name)
+                || "steam_data".equals(name)
+                || "virtual_containers".equals(name);
+    }
+
+    private static int patchWinebusDurationFile(File file) throws IOException {
+        long len = file.length();
+        if (len < WINEBUS_ORIGINAL_SITE.length || len > WINEBUS_PATCH_MAX_BYTES) {
+            Log.i(TAG, "winebus duration patch skipped unexpected size="
+                    + len + " path=" + file.getAbsolutePath());
+            return 0;
+        }
+
+        byte[] blob = new byte[(int) len];
+        try (RandomAccessFile raf = new RandomAccessFile(file, "rw")) {
+            raf.readFully(blob);
+            if (!startsWith(blob, WINEBUS_ELF_MAGIC) || indexOf(blob, WINEBUS_RUMBLE_STRING, 0) < 0) {
+                Log.i(TAG, "winebus duration patch skipped non-target path=" + file.getAbsolutePath());
+                return 0;
+            }
+
+            int[] originalHits = new int[4];
+            int originalCount = collectHits(blob, WINEBUS_ORIGINAL_SITE, originalHits);
+            int patchedCount = collectHits(blob, WINEBUS_PATCHED_SITE, null);
+
+            if (originalCount == 0 && patchedCount == 2) {
+                Log.i(TAG, "winebus duration patch already applied path=" + file.getAbsolutePath());
+                return 2;
+            }
+            if (originalCount != 2) {
+                Log.i(TAG, "winebus duration patch skipped pattern mismatch original="
+                        + originalCount + " patched=" + patchedCount
+                        + " path=" + file.getAbsolutePath());
+                return 0;
+            }
+
+            for (int i = 0; i < originalCount; i++) {
+                raf.seek(originalHits[i]);
+                raf.write(WINEBUS_PATCHED_LOAD);
+            }
+            Log.i(TAG, "winebus duration patch applied path=" + file.getAbsolutePath()
+                    + " offsets=0x" + Integer.toHexString(originalHits[0])
+                    + ",0x" + Integer.toHexString(originalHits[1]));
+            return 1;
+        }
+    }
+
+    private static boolean startsWith(byte[] blob, byte[] prefix) {
+        if (blob.length < prefix.length) return false;
+        for (int i = 0; i < prefix.length; i++) {
+            if (blob[i] != prefix[i]) return false;
+        }
+        return true;
+    }
+
+    private static int collectHits(byte[] blob, byte[] needle, int[] offsets) {
+        int count = 0;
+        int start = 0;
+        while (true) {
+            int pos = indexOf(blob, needle, start);
+            if (pos < 0) return count;
+            if (offsets != null && count < offsets.length) offsets[count] = pos;
+            count++;
+            start = pos + 1;
+        }
+    }
+
+    private static int indexOf(byte[] blob, byte[] needle, int start) {
+        if (needle.length == 0) return start <= blob.length ? start : -1;
+        int max = blob.length - needle.length;
+        for (int i = Math.max(0, start); i <= max; i++) {
+            int j = 0;
+            while (j < needle.length && blob[i + j] == needle[j]) j++;
+            if (j == needle.length) return i;
+        }
+        return -1;
     }
 
     /** Settings-UI helper: global enable/disable for libevshim preload.

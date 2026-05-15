@@ -26,6 +26,13 @@ What you get over stock GameHub:
   `rumble_expiration` auto-stops sustained rumble on stock; an LD_PRELOAD
   shim (`libevshim.so`) re-issues `SDL_JoystickRumble` every 500 ms with a
   2 s duration so the timer never fires.
+- **Experimental preload-free Wine patch.** For games that fail when
+  `libevshim.so` is mapped, the APK's launch-time Java hook patches the
+  app-owned `aarch64-unix/winebus.so` directly. The offline helper
+  [scripts/patch_winebus_rumble_duration.py](scripts/patch_winebus_rumble_duration.py)
+  applies the same patch to extracted components. It changes only the two
+  nonzero SDL rumble start calls to pass `0xffffffff` as the SDL duration;
+  zero-duration stop calls still stop immediately.
 - **Instant release** when the game stops rumble — no phantom-suppression
   timer extending the motor past the actual stop call.
 
@@ -53,6 +60,12 @@ dynamic linker never maps it into the Wine subprocess. Tradeoff for the
 disabled game: SDL's 1 s rumble auto-expiry kicks back in, so sustained
 rumble cuts at one second. Dual-motor dispatch and instant release still
 work (smali patches 1–3 are independent of libevshim).
+
+The APK attempts the Wine-side `winebus.so` duration patch once per app
+process before deciding whether to add `libevshim.so` to LD_PRELOAD. For
+Shotgun King, disable **Engine keepalive**. That avoids the `libevshim.so`
+mapping that breaks launch, while the Wine-side duration patch keeps SDL
+from auto-stopping rumble at one second.
 
 The toggle's setting lives under the same `pc_g_setting<gameId>` file as
 Mode/Intensity, so it round-trips through Export/Import the same way.
@@ -113,6 +126,8 @@ scripts/
   apply_vibration_patches.py       smali hooks against a decompiled
                                    apktool tree (6.0.2 or 6.0.4;
                                    version auto-detected from layout).
+  patch_winebus_rumble_duration.py experimental preload-free patch for
+                                   extracted aarch64-unix/winebus.so.
 
 .github/workflows/build.yml        CI build pipeline.
 ```
