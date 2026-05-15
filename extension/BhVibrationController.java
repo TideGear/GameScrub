@@ -151,6 +151,58 @@ public final class BhVibrationController {
             0x03, 0x00, (byte) 0x80, 0x12
     };
 
+    // ELF e_machine values at offset 0x12 (little-endian 16-bit).
+    private static final int ELF_MACHINE_AARCH64 = 0xb7;  // EM_AARCH64 (183)
+    private static final int ELF_MACHINE_X86_64  = 0x3e;  // EM_X86_64 (62)
+
+    // x86_64 SDL_JoystickRumble / SDL_JoystickRumbleTriggers call-site detection.
+    //
+    // Wine's bus_sdl.c sdl_device_haptics_start passes `duration_ms` as the
+    // 4th argument to both pSDL_JoystickRumble and pSDL_JoystickRumbleTriggers.
+    // In System V x86_64 the 4th arg lives in ECX, so just before each
+    // indirect call the compiler emits a `mov ecx, <duration_slot>` followed
+    // by `call qword ptr [rip+disp32]`. The duration slot is the same stack
+    // location for both calls (compiler-saved at function entry).
+    //
+    // Two encodings of the duration load we accept:
+    //   "8B 4D <disp8> FF 15 <disp32>"      mov ecx, [rbp+disp8]; call [rip+disp32]   (9 bytes)
+    //   "8B 4C 24 <disp8> FF 15 <disp32>"   mov ecx, [rsp+disp8]; call [rip+disp32]  (10 bytes)
+    // Fixed positions are validated via WILDCARD_FIXED_*; disp bytes float.
+    //
+    // We patch the `mov ecx, ...` instruction to `or ecx, -1` (83 C9 FF), which
+    // sets ECX = 0xFFFFFFFF in 3 bytes regardless of its prior value, then pad
+    // with NOPs (0x90) to keep the instruction length identical so RIP-relative
+    // call disp32 is untouched. Zero-duration stop paths are separate call
+    // sites with a different (zero immediate / xor) load and are left alone.
+    //
+    // Heuristic: scan both encodings, require exactly 2 matches of one of them
+    // before patching. 0 or >2 → skip (and dump the file under
+    // <externalFilesDir>/winebus_dump_x86_64.so for offline refinement).
+    private static final byte[] X86_64_PATCHED_LOAD_3 = new byte[] {
+            (byte) 0x83, (byte) 0xc9, (byte) 0xff                  // or ecx, -1
+    };
+    private static final byte[] X86_64_PATCHED_LOAD_4 = new byte[] {
+            (byte) 0x83, (byte) 0xc9, (byte) 0xff, (byte) 0x90     // or ecx, -1 ; nop
+    };
+    // Pattern A: mov ecx, [rbp+disp8]; call [rip+disp32]
+    private static final byte[] X86_64_PATTERN_A = new byte[] {
+            (byte) 0x8b, (byte) 0x4d, 0x00,
+            (byte) 0xff, (byte) 0x15, 0x00, 0x00, 0x00, 0x00
+    };
+    private static final boolean[] X86_64_PATTERN_A_FIXED = new boolean[] {
+            true,  true,  false,
+            true,  true,  false, false, false, false
+    };
+    // Pattern B: mov ecx, [rsp+disp8]; call [rip+disp32]
+    private static final byte[] X86_64_PATTERN_B = new byte[] {
+            (byte) 0x8b, (byte) 0x4c, (byte) 0x24, 0x00,
+            (byte) 0xff, (byte) 0x15, 0x00, 0x00, 0x00, 0x00
+    };
+    private static final boolean[] X86_64_PATTERN_B_FIXED = new boolean[] {
+            true,  true,  true,  false,
+            true,  true,  false, false, false, false
+    };
+
     public static BhVibrationController getInstance() {
         BhVibrationController local = INSTANCE;
         if (local == null) {
@@ -456,7 +508,7 @@ public final class BhVibrationController {
             }
 
             int[] stats = new int[4]; // files visited, winebus found, patched, already patched
-            scanWinebusFiles(root, 0, stats);
+            scanWinebusFiles(ctx, root, 0, stats);
             Log.i(TAG, "winebus duration patch scan files=" + stats[0]
                     + " winebus=" + stats[1]
                     + " patched=" + stats[2]
@@ -470,7 +522,7 @@ public final class BhVibrationController {
         }
     }
 
-    private static void scanWinebusFiles(File file, int depth, int[] stats) {
+    private static void scanWinebusFiles(Context ctx, File file, int depth, int[] stats) {
         if (file == null || depth > WINEBUS_SCAN_MAX_DEPTH || stats[0] >= WINEBUS_SCAN_MAX_FILES) {
             return;
         }
@@ -482,7 +534,7 @@ public final class BhVibrationController {
             if (children == null) return;
             for (File child : children) {
                 if (stats[0] >= WINEBUS_SCAN_MAX_FILES) break;
-                scanWinebusFiles(child, depth + 1, stats);
+                scanWinebusFiles(ctx, child, depth + 1, stats);
             }
             return;
         }
@@ -490,7 +542,7 @@ public final class BhVibrationController {
         if (!"winebus.so".equals(file.getName())) return;
         stats[1]++;
         try {
-            int result = patchWinebusDurationFile(file);
+            int result = patchWinebusDurationFile(ctx, file);
             if (result == 1) stats[2]++;
             else if (result == 2) stats[3]++;
         } catch (Throwable t) {
@@ -506,7 +558,7 @@ public final class BhVibrationController {
                 || "virtual_containers".equals(name);
     }
 
-    private static int patchWinebusDurationFile(File file) throws IOException {
+    private static int patchWinebusDurationFile(Context ctx, File file) throws IOException {
         long len = file.length();
         if (len < WINEBUS_ORIGINAL_SITE.length || len > WINEBUS_PATCH_MAX_BYTES) {
             Log.i(TAG, "winebus duration patch skipped unexpected size="
@@ -522,29 +574,166 @@ public final class BhVibrationController {
                 return 0;
             }
 
-            int[] originalHits = new int[4];
-            int originalCount = collectHits(blob, WINEBUS_ORIGINAL_SITE, originalHits);
-            int patchedCount = collectHits(blob, WINEBUS_PATCHED_SITE, null);
-
-            if (originalCount == 0 && patchedCount == 2) {
-                Log.i(TAG, "winebus duration patch already applied path=" + file.getAbsolutePath());
-                return 2;
+            int machine = readElfMachine(blob);
+            if (machine == ELF_MACHINE_AARCH64) {
+                return patchAarch64Sites(file, blob, raf);
             }
-            if (originalCount != 2) {
-                Log.i(TAG, "winebus duration patch skipped pattern mismatch original="
-                        + originalCount + " patched=" + patchedCount
-                        + " path=" + file.getAbsolutePath());
-                return 0;
+            if (machine == ELF_MACHINE_X86_64) {
+                int result = patchX86_64Sites(file, blob, raf);
+                if (result == 0) {
+                    // Pattern didn't match — dump for offline pattern refinement.
+                    dumpForOfflineAnalysis(ctx, file, blob, "x86_64");
+                }
+                return result;
             }
 
-            for (int i = 0; i < originalCount; i++) {
-                raf.seek(originalHits[i]);
-                raf.write(WINEBUS_PATCHED_LOAD);
+            Log.i(TAG, "winebus duration patch skipped unknown e_machine=0x"
+                    + Integer.toHexString(machine) + " path=" + file.getAbsolutePath());
+            return 0;
+        }
+    }
+
+    private static int readElfMachine(byte[] blob) {
+        if (blob.length < 20) return -1;
+        return (blob[18] & 0xff) | ((blob[19] & 0xff) << 8);
+    }
+
+    private static int patchAarch64Sites(File file, byte[] blob, RandomAccessFile raf) throws IOException {
+        int[] originalHits = new int[4];
+        int originalCount = collectHits(blob, WINEBUS_ORIGINAL_SITE, originalHits);
+        int patchedCount = collectHits(blob, WINEBUS_PATCHED_SITE, null);
+
+        if (originalCount == 0 && patchedCount == 2) {
+            Log.i(TAG, "winebus duration patch already applied path=" + file.getAbsolutePath());
+            return 2;
+        }
+        if (originalCount != 2) {
+            Log.i(TAG, "winebus duration patch skipped pattern mismatch original="
+                    + originalCount + " patched=" + patchedCount
+                    + " path=" + file.getAbsolutePath());
+            return 0;
+        }
+
+        for (int i = 0; i < originalCount; i++) {
+            raf.seek(originalHits[i]);
+            raf.write(WINEBUS_PATCHED_LOAD);
+        }
+        Log.i(TAG, "winebus duration patch applied path=" + file.getAbsolutePath()
+                + " offsets=0x" + Integer.toHexString(originalHits[0])
+                + ",0x" + Integer.toHexString(originalHits[1]));
+        return 1;
+    }
+
+    private static int patchX86_64Sites(File file, byte[] blob, RandomAccessFile raf) throws IOException {
+        int[] hitsA = new int[8];
+        int[] hitsB = new int[8];
+        int countA = collectWildcardHits(blob, X86_64_PATTERN_A, X86_64_PATTERN_A_FIXED, hitsA);
+        int countB = collectWildcardHits(blob, X86_64_PATTERN_B, X86_64_PATTERN_B_FIXED, hitsB);
+
+        // Already-patched detection: the `mov ecx, ...` slot is now `83 C9 FF`,
+        // immediately followed by NOPs / unchanged call. Count adjacent
+        // "83 C9 FF" + FF 15 patterns; both call sites patched if exactly 2.
+        int patchedCount = collectX86_64PatchedHits(blob);
+        if (countA == 0 && countB == 0 && patchedCount == 2) {
+            Log.i(TAG, "winebus duration patch already applied path=" + file.getAbsolutePath());
+            return 2;
+        }
+
+        int[] hits;
+        byte[] replacement;
+        String encoding;
+        if (countA == 2 && countB == 0) {
+            hits = hitsA;
+            replacement = X86_64_PATCHED_LOAD_3;   // mov ecx,[rbp+disp8] is 3 bytes → 3-byte replacement
+            encoding = "rbp-relative";
+        } else if (countB == 2 && countA == 0) {
+            hits = hitsB;
+            replacement = X86_64_PATCHED_LOAD_4;   // mov ecx,[rsp+disp8] is 4 bytes → 3-byte + NOP
+            encoding = "rsp-relative";
+        } else {
+            Log.i(TAG, "winebus duration patch skipped pattern mismatch (x86_64)"
+                    + " rbp_hits=" + countA + " rsp_hits=" + countB
+                    + " patched=" + patchedCount
+                    + " path=" + file.getAbsolutePath());
+            return 0;
+        }
+
+        for (int i = 0; i < 2; i++) {
+            raf.seek(hits[i]);
+            raf.write(replacement);
+        }
+        Log.i(TAG, "winebus duration patch applied (x86_64 " + encoding + ") path="
+                + file.getAbsolutePath()
+                + " offsets=0x" + Integer.toHexString(hits[0])
+                + ",0x" + Integer.toHexString(hits[1]));
+        return 1;
+    }
+
+    // Count "83 C9 FF" preceding "FF 15" within the next 1-2 bytes (accounting
+    // for an optional NOP), which marks a previously-patched x86_64 call site.
+    private static int collectX86_64PatchedHits(byte[] blob) {
+        int count = 0;
+        int max = blob.length - 5;
+        for (int i = 0; i <= max; i++) {
+            if (blob[i] != (byte) 0x83) continue;
+            if (blob[i + 1] != (byte) 0xc9) continue;
+            if (blob[i + 2] != (byte) 0xff) continue;
+            // rbp-form: 83 C9 FF FF 15
+            if (blob[i + 3] == (byte) 0xff && blob[i + 4] == (byte) 0x15) {
+                count++;
+                continue;
             }
-            Log.i(TAG, "winebus duration patch applied path=" + file.getAbsolutePath()
-                    + " offsets=0x" + Integer.toHexString(originalHits[0])
-                    + ",0x" + Integer.toHexString(originalHits[1]));
-            return 1;
+            // rsp-form: 83 C9 FF 90 FF 15 (NOP padding)
+            if (i + 5 < blob.length
+                    && blob[i + 3] == (byte) 0x90
+                    && blob[i + 4] == (byte) 0xff
+                    && blob[i + 5] == (byte) 0x15) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static int collectWildcardHits(byte[] blob, byte[] pattern, boolean[] fixed, int[] hits) {
+        int count = 0;
+        int max = blob.length - pattern.length;
+        for (int i = 0; i <= max; i++) {
+            boolean ok = true;
+            for (int j = 0; j < pattern.length; j++) {
+                if (fixed[j] && blob[i + j] != pattern[j]) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) {
+                if (hits != null && count < hits.length) hits[count] = i;
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // Dumps `blob` to <externalFilesDir>/winebus_dump_<tag>.so once, so the
+    // unmatched binary can be pulled off the device with adb and disassembled
+    // offline to refine the byte-pattern heuristics. Idempotent: skips if
+    // the dump already exists.
+    private static void dumpForOfflineAnalysis(Context ctx, File source, byte[] blob, String tag) {
+        if (ctx == null) return;
+        try {
+            File dir = ctx.getExternalFilesDir(null);
+            if (dir == null) return;
+            File dump = new File(dir, "winebus_dump_" + tag + ".so");
+            if (dump.exists()) return;
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(dump);
+            try {
+                fos.write(blob);
+            } finally {
+                fos.close();
+            }
+            Log.i(TAG, "winebus dump for offline analysis: "
+                    + source.getAbsolutePath() + " -> " + dump.getAbsolutePath());
+        } catch (Throwable t) {
+            Log.w(TAG, "winebus dump failed", t);
         }
     }
 
