@@ -5,7 +5,6 @@ import android.content.SharedPreferences;
 import android.media.AudioAttributes;
 import android.os.Build;
 import android.os.CombinedVibration;
-import android.os.FileObserver;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
@@ -20,12 +19,8 @@ import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicIntegerArray;
 import java.util.concurrent.atomic.AtomicLongArray;
@@ -45,12 +40,16 @@ import java.util.concurrent.atomic.AtomicLongArray;
  *   - onStop(deviceId): stop hook, invoked at the head of g58.f()V (was
  *     GamepadDevice$Physical.g in 5.3.5). Clears the keepalive map so the
  *     keepalive thread doesn't re-arm a controller the game just stopped.
- *   - scheduleWakeup(serverManager, slot): connect-time wake-up, invoked at
- *     the head of GamepadManager.B0(GamepadConnectionEvent)V on 5.3.5 only.
- *     Triggers libvfs's lazy SDL_JOYDEVICEADDED so winebus opens the slot's
- *     joystick before the user provides input. 6.0.1+ doesn't call this —
- *     the gamepad-subsystem refactor fixed lazy-attach natively, and the
- *     5.3.5-only smali patch (GamepadManager.B0) is the only call site.
+ *   - ensureWinebusDurationPatchOnce(ctx): pre-launch disk-patch trigger,
+ *     invoked from the env builder (bg5.a / dg5.a) immediately before the
+ *     join that hands env vars to the Wine launcher. Scans the app's files
+ *     tree for every winebus.so and rewrites the two non-zero
+ *     SDL_JoystickRumble call sites to pass 0xffffffff as the duration so
+ *     SDL's ~1 s rumble_expiration never fires. AtomicBoolean inside gates
+ *     against repeat scans. No LD_PRELOAD modification — this replaced the
+ *     previous libevgate/libevshim LD_PRELOAD path, which silently exited
+ *     games like Shotgun King that don't tolerate extra mappings in their
+ *     Wine subprocess address space.
  *
  * Modes:
  *   0 = Off         — no rumble anywhere
@@ -86,10 +85,6 @@ public final class BhVibrationController {
     public static final String PER_GAME_PREFS_FMT = "pc_g_setting%s";
     public static final String PER_GAME_KEY_MODE      = "bh_vibration_mode";
     public static final String PER_GAME_KEY_INTENSITY = "bh_vibration_intensity";
-    /** Legacy key from builds that exposed an Engine keepalive checkbox.
-     *  Kept only so old exports/imports do not collide with anything else;
-     *  launch-time keepalive now defaults on unconditionally. */
-    public static final String PER_GAME_KEY_EVSHIM    = "bh_evshim_enabled";
     public static final String GLOBAL_KEY_MODE      = "mode";
     public static final String GLOBAL_KEY_INTENSITY = "intensity";
 
@@ -213,20 +208,19 @@ public final class BhVibrationController {
     //
     // Earlier builds of this controller suppressed any (0,0) arriving in a
     // [950, 1050] ms window after the previous non-zero — the signature of
-    // SDL2's internal 1 s rumble auto-expiry. With the libevshim guest-side
-    // shim now patching winebus.so's pSDL_JoystickRumble pointer to our
-    // wrapper, the keepalive thread re-issues the active rumble every 500 ms
-    // with a 2 s duration, which resets SDL2's internal rumble_expiration on
-    // every call (SDL2 updates the timer even when low/high are unchanged).
-    // The phantom can no longer fire, so suppressing in this window only
-    // produced false positives on legitimate ~1 s game-driven holds (e.g.
-    // a 1.05 s press registered as gap=1050 ms → host suppresses for another
-    // 1 s = ~2 s of rumble for a 1 s press). PC-accurate behavior is to
-    // trust every (0,0) as a real game release and stop instantly.
+    // SDL2's internal 1 s rumble auto-expiry. With the disk patch now
+    // rewriting winebus.so's two non-zero SDL_JoystickRumble call sites to
+    // pass 0xffffffff as the duration, SDL2's internal rumble_expiration is
+    // ~50 days out and never fires. The phantom can no longer reach us, so
+    // suppressing in this window only produced false positives on legitimate
+    // ~1 s game-driven holds (e.g. a 1.05 s press registered as gap=1050 ms
+    // → host suppresses for another 1 s = ~2 s of rumble for a 1 s press).
+    // PC-accurate behavior is to trust every (0,0) as a real game release
+    // and stop instantly.
     //
     // The DIAG line still tags the [900, 1200] ms window as
-    // "[SDL_AUTO_EXPIRY?]" for telemetry — useful if the keepalive ever
-    // breaks again — but no functional path branches on it.
+    // "[SDL_AUTO_EXPIRY?]" for telemetry — useful if the disk patch ever
+    // misses a winebus.so — but no functional path branches on it.
 
     // Last device-effect time so we don't overwhelm phone vibrator.
     private volatile long lastDeviceDispatch = 0L;
@@ -377,36 +371,6 @@ public final class BhVibrationController {
     public int getMode() { return cachedMode; }
     public int getIntensity() { return cachedIntensity; }
 
-    /** Legacy per-game engine keepalive preference reader. The launch path now
-     *  defaults the winedevice-only gate on in shouldPreloadEvshim(), so this
-     *  value is intentionally not consulted there. */
-    public boolean isEvshimEnabledForCurrentContainer() {
-        if (containerGameId == null || appContext == null) return true;
-        try {
-            SharedPreferences perGame = appContext.getSharedPreferences(
-                    String.format(PER_GAME_PREFS_FMT, containerGameId), Context.MODE_PRIVATE);
-            return perGame.getBoolean(PER_GAME_KEY_EVSHIM, true);
-        } catch (Throwable t) {
-            return true;
-        }
-    }
-
-    /** Legacy per-game engine keepalive preference writer. Kept for older
-     *  smali/UI callers, but current builds do not expose this setting. */
-    public void setEvshimEnabledForCurrentContainer(boolean enabled) {
-        if (containerGameId == null || appContext == null) return;
-        try {
-            appContext.getSharedPreferences(
-                            String.format(PER_GAME_PREFS_FMT, containerGameId), Context.MODE_PRIVATE)
-                    .edit()
-                    .putBoolean(PER_GAME_KEY_EVSHIM, enabled)
-                    .apply();
-            Log.i(TAG, "evshim=" + enabled + " for container=" + containerGameId);
-        } catch (Throwable t) {
-            Log.w(TAG, "setEvshimEnabledForCurrentContainer failed", t);
-        }
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
     // Smali entry 1: GamepadServerManager.onRumble(slot, low, high)
     //   Return true  → caller short-circuits (device-only or off).
@@ -444,9 +408,9 @@ public final class BhVibrationController {
     // Patch 7 hooks g()V to call onStop(deviceId), which always issues our
     // pre-cancel supersede pattern (Samsung-HAL workaround) and falls through
     // to stock g() afterwards. Returns void — the previous boolean return
-    // (for SDL phantom suppression) became vestigial when libevshim's
-    // keepalive made phantom suppression unnecessary; the smali patch no
-    // longer branches on the result.
+    // (for SDL phantom suppression) became vestigial once the disk-patched
+    // winebus.so duration kept SDL's auto-expiry from ever firing; the smali
+    // patch no longer branches on the result.
     // ─────────────────────────────────────────────────────────────────────────
     public static void onStop(int deviceId) {
         try {
@@ -457,66 +421,28 @@ public final class BhVibrationController {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Smali entry 4 (5.3.5 only): GamepadManager.B0(GamepadConnectionEvent)V.
+    // Smali entry 4: env builder (bg5.a / dg5.a) pre-launch disk-patch trigger.
     //
-    // When a controller connects, libvfs.so creates a virtual SDL joystick for
-    // the slot but does NOT emit SDL_JOYDEVICEADDED until first input arrives.
-    // winebus.so therefore never calls SDL_JoystickOpen on the slot, and the
-    // game's XInputSetState dispatch ends up writing rumble to a slot winebus
-    // hasn't registered — silent no-op. Multi-controller users see the second
-    // (and Nth) controller's rumble fail until they press any button on it.
+    // Fires immediately before the env builder joins its env list and hands
+    // off to the Wine launcher. We scan every winebus.so in app storage and
+    // rewrite the two non-zero SDL_JoystickRumble call sites to pass
+    // 0xffffffff as the duration so SDL2's ~1 s rumble_expiration never
+    // fires. Zero-duration stop calls are separate sites and stay untouched.
     //
-    // This hook fires once per connect with the GamepadServerManager + slot
-    // available. We queue a wake-up gated on a winedevice readiness marker
-    // written by libevshim; once the marker fires, drainPendingWakeups()
-    // staggers each slot's button-14 press/release through the slot's
-    // GamepadState (200 ms apart, ascending). libvfs's poller sees the
-    // button-byte change → emits SDL_JOYDEVICEADDED → winebus opens the
-    // joystick → rumble dispatch works without user input.
+    // No LD_PRELOAD modification — Wine's preloader is famously sensitive
+    // to address-space layout, and a small set of games (Shotgun King is
+    // the canonical case) silently exit at launch when any extra .so is
+    // mapped into their Wine subprocess address space. Patching winebus.so
+    // on disk keeps the keepalive without introducing a new mapping.
     //
-    // 6.0.1+ doesn't need this — the 6.0.1 gamepad subsystem refactor fixed
-    // the lazy-attach issue natively, and the 5.3.5 smali patch
-    // (GamepadManager.B0) is the only call site. Reflection-based to avoid
-    // compile-time dependency on Tencent's gamepad classes.
+    // Smali patches 1-3 (dual-motor dispatch + instant release) are
+    // independent of this and work whether the disk patch lands or not.
     // ─────────────────────────────────────────────────────────────────────────
-    public static void scheduleWakeup(Object serverManager, int slot) {
-        try {
-            getInstance().handleScheduleWakeup(serverManager, slot);
-        } catch (Throwable t) {
-            Log.w(TAG, "scheduleWakeup failed", t);
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Smali entry 5: bg5.a env builder (LD_PRELOAD construction).
-    //
-    // The vibration patch prepends <nativeLibDir>/libevgate.so to LD_PRELOAD.
-    // The gate library maps into the Wine process tree, but it only dlopen()s
-    // libevshim.so when /proc/self/cmdline is winedevice.exe. Empirically a
-    // small set of games (Shotgun King is the first confirmed case) silently
-    // exit at launch when libevshim itself is mmap'd into their Wine process.
-    // This keeps the actual evshim mapping out of the game process while still
-    // letting winedevice.exe patch winebus and keep SDL rumble alive.
-    //
-    // The smali patch in bg5.a() calls this from the LD_PRELOAD builder
-    // BEFORE adding libevgate to the env list. Older builds tried to drive
-    // this from a per-game setting, but the settings entry point is brittle
-    // in stock GameHub. Default the winedevice-only gate on unconditionally
-    // so stale pref files cannot disable the SK test path.
-    //
-    // Returning true lets the smali helper add libevgate to LD_PRELOAD.
-    // We also patch the app-owned winebus.so on disk so the nonzero SDL
-    // rumble start calls use a non-expiring duration. Smali patches 1-3 are
-    // independent (dual-motor dispatch + instant release).
-    // ─────────────────────────────────────────────────────────────────────────
-    public static boolean shouldPreloadEvshim(Context ctx) {
+    public static void ensureWinebusDurationPatchOnce(Context ctx) {
         try {
             if (ctx != null) ensureWinebusDurationPatch(ctx);
-            Log.i(TAG, "shouldPreloadEvshim=true (default winedevice-only gate)");
-            return true;
         } catch (Throwable t) {
-            Log.w(TAG, "shouldPreloadEvshim failed - defaulting to enabled", t);
-            return true;
+            Log.w(TAG, "ensureWinebusDurationPatchOnce failed", t);
         }
     }
 
@@ -653,66 +579,6 @@ public final class BhVibrationController {
         return -1;
     }
 
-    /** Settings-UI helper: global enable/disable for engine keepalive preload.
-     *  Writes/deletes the <filesDir>/.bh_skip_evshim marker. */
-    public static void setEvshimGlobalEnabled(Context ctx, boolean enabled) {
-        if (ctx == null) return;
-        try {
-            File marker = new File(ctx.getFilesDir(), ".bh_skip_evshim");
-            if (enabled) {
-                if (marker.exists()) marker.delete();
-            } else if (!marker.exists()) {
-                marker.createNewFile();
-            }
-            Log.i(TAG, "engine keepalive preload " + (enabled ? "ENABLED" : "DISABLED"));
-        } catch (Throwable t) {
-            Log.w(TAG, "setEvshimGlobalEnabled failed", t);
-        }
-    }
-
-    /** Settings-UI helper: current global toggle state. */
-    public static boolean isEvshimGlobalEnabled(Context ctx) {
-        if (ctx == null) return true;
-        try {
-            return !new File(ctx.getFilesDir(), ".bh_skip_evshim").exists();
-        } catch (Throwable t) {
-            return true;
-        }
-    }
-
-    /** Walk the live-activity table for any WineActivity and pull its
-     *  "gameId" Intent extra. Same approach as
-     *  maybeResolveContainerFromActivityStack but exposed as a static
-     *  query so the env-builder helper (called pre-Wine-spawn) can use
-     *  it without needing a controller instance. */
-    private static String resolveLaunchingGameId() {
-        try {
-            Class<?> atCls = Class.forName("android.app.ActivityThread");
-            Method cur = atCls.getMethod("currentActivityThread");
-            Object at = cur.invoke(null);
-            if (at == null) return null;
-            java.lang.reflect.Field fActs = atCls.getDeclaredField("mActivities");
-            fActs.setAccessible(true);
-            Object acts = fActs.get(at);
-            if (!(acts instanceof Map)) return null;
-            for (Object recordObj : ((Map<?, ?>) acts).values()) {
-                if (recordObj == null) continue;
-                java.lang.reflect.Field fAct = recordObj.getClass().getDeclaredField("activity");
-                fAct.setAccessible(true);
-                Object activity = fAct.get(recordObj);
-                if (!(activity instanceof android.app.Activity)) continue;
-                String clsName = activity.getClass().getName();
-                if (!clsName.endsWith(".WineActivity")) continue;
-                android.content.Intent it = ((android.app.Activity) activity).getIntent();
-                if (it == null) continue;
-                String gid = it.getStringExtra("gameId");
-                if (gid != null && !gid.isEmpty()) return gid;
-            }
-        } catch (Throwable ignored) { }
-        return null;
-    }
-
-
     // ─────────────────────────────────────────────────────────────────────────
     // Core logic
     // ─────────────────────────────────────────────────────────────────────────
@@ -799,207 +665,6 @@ public final class BhVibrationController {
         // when ANY controller stops in a multi-controller session.
         // Supersede AHEAD of stock g()'s per-vibrator cancel.
         stopController(deviceId);
-    }
-
-    /**
-     * Wake up libvfs's lazily-registered virtual joystick by toggling a
-     * button bit in the slot's GamepadState, which triggers libvfs-client
-     * (in winedevice.exe) to emit SDL_JOYDEVICEADDED so winebus.so can
-     * open the joystick before the user provides input.
-     *
-     * Detection-driven, not timing-driven: connects are queued in
-     * pendingWakeups and fired only when libevshim writes the
-     * .bh_winedevice_ready marker file from inside winedevice.exe (after
-     * its winebus GOT patch lands, which by construction is AFTER libvfs-
-     * client has fully initialized its mmap'd shared buffer). A FileObserver
-     * on the marker drains the queue.
-     *
-     * Stimulus is a button-14 press/release (50 ms apart) via
-     * GamepadState.b(int, boolean). Index 14 is the highest the
-     * range check `p1 < 0xf` accepts (storage offset = 12 + index → byte
-     * 26, well past the axis bytes at 0..11) and is unmapped by every
-     * common XInput-targeting game (XInput defines 14 buttons, indices
-     * 0..13). Empirically axis flicker failed for slot >=1 in multi-
-     * controller setups; button flicker works because libvfs's poller
-     * checks button bytes for the lazy-attach trigger.
-     *
-     * All Tencent class access via reflection because GamepadServerManager
-     * and GamepadState aren't on our compile classpath. Field/method names:
-     *   GamepadServerManager.g(int)        → GamepadState
-     *   GamepadState.b(int, boolean)       → write button byte
-     */
-    private static final String READY_MARKER_NAME = ".bh_winedevice_ready";
-
-    private final Map<Integer, Object> pendingWakeups = new ConcurrentHashMap<>();
-    private final AtomicBoolean readinessWatcherStarted = new AtomicBoolean(false);
-    private volatile FileObserver readinessObserver;
-    // Cache reflection lookups — the GamepadServerManager and GamepadState
-    // classes are the same across every wake-up. Volatile so the
-    // benign-race "look up twice" on first cold start is safe.
-    private volatile Method cachedGetStateMethod;
-    private volatile Method cachedWriteButtonMethod;
-
-    private void handleScheduleWakeup(final Object serverManager, final int slot) {
-        if (serverManager == null || slot < 0 || slot >= MAX_SLOTS) {
-            return;
-        }
-        // Resolve the application Context first — without it we can't find
-        // getFilesDir() to register the FileObserver. handleScheduleWakeup
-        // is sometimes the FIRST entry point hit on cold start (before any
-        // rumble dispatch has called ensureContext for us).
-        ensureContext();
-        maybeResolveContainerFromActivityStack();
-
-        ensureReadinessWatcher();
-        pendingWakeups.put(slot, serverManager);
-        Log.i(TAG, "wake-up queued slot=" + slot + " (awaiting winedevice ready marker)");
-
-        // If the marker already exists from an earlier patcher run, the
-        // FileObserver won't fire — drain immediately.
-        File marker = readyMarkerFile();
-        if (marker != null && marker.exists()) {
-            Log.i(TAG, "wake-up: marker already exists, firing immediately");
-            drainPendingWakeups();
-        }
-    }
-
-    private File readyMarkerFile() {
-        Context ctx = appContext;
-        if (ctx == null) return null;
-        File dir = ctx.getFilesDir();
-        if (dir == null) return null;
-        return new File(dir, READY_MARKER_NAME);
-    }
-
-    private void ensureReadinessWatcher() {
-        if (readinessWatcherStarted.get()) return;
-        Context ctx = appContext;
-        if (ctx == null) return;
-        File dir = ctx.getFilesDir();
-        if (dir == null) return;
-        if (!readinessWatcherStarted.compareAndSet(false, true)) return;
-
-        // Delete any stale marker left over from a previous app session.
-        // The marker indicates "winedevice's libvfs is ready" but it's
-        // valid only for the *current* winedevice process. On a fresh
-        // launch, the previous marker is meaningless — if we saw it,
-        // we'd fire the wake-up before the new winedevice's libvfs has
-        // come up. Force evshim's next write to be a fresh CREATE event
-        // we can trust.
-        File staleMarker = new File(dir, READY_MARKER_NAME);
-        if (staleMarker.exists()) {
-            boolean deleted = staleMarker.delete();
-            Log.i(TAG, "deleted stale ready marker (deleted=" + deleted + ")");
-        }
-
-        // Watch CREATE (fresh marker after a winedevice respawn — evshim
-        // unlinks before recreating to guarantee this fires) and MODIFY
-        // (in case the unlink races with FileObserver registration).
-        FileObserver fo = new FileObserver(dir.getAbsolutePath(),
-                FileObserver.CREATE | FileObserver.MODIFY | FileObserver.MOVED_TO) {
-            @Override public void onEvent(int event, String path) {
-                if (path == null) return;
-                if (!READY_MARKER_NAME.equals(path)) return;
-                Log.i(TAG, "winedevice ready marker observed (event=0x" + Integer.toHexString(event) + ")");
-                worker.post(new Runnable() {
-                    @Override public void run() { drainPendingWakeups(); }
-                });
-            }
-        };
-        fo.startWatching();
-        readinessObserver = fo;
-        Log.i(TAG, "readiness watcher started on " + dir.getAbsolutePath());
-    }
-
-    private void drainPendingWakeups() {
-        if (pendingWakeups.isEmpty()) return;
-
-        // Stagger wake-ups across slots in ascending order. With a third
-        // controller in the mix, libvfs's SDL_GameController vs. raw
-        // SDL_Joystick split (the "SDL B / SDL A" distinction Wine joystick
-        // testers expose) seems to depend on lower slots being fully
-        // SDL-registered before higher slots' button events trigger
-        // SDL_JOYDEVICEADDED. Empirically: pressing real buttons on slots
-        // 0+1 also unsticks slot 2's rumble — so slot 2's button-flicker
-        // *did* land in shared memory, libvfs just hadn't started watching
-        // it yet. Firing in ascending order, ~200 ms apart, gives each
-        // slot time to register before the next stimulus arrives.
-        List<Integer> slots = new ArrayList<>(pendingWakeups.keySet());
-        Collections.sort(slots);
-        long delayMs = 0L;
-        for (final int slot : slots) {
-            final Object serverManager = pendingWakeups.get(slot);
-            if (serverManager == null) continue;
-            if (delayMs == 0L) {
-                fireWakeup(serverManager, slot);
-            } else {
-                worker.postDelayed(new Runnable() {
-                    @Override public void run() { fireWakeup(serverManager, slot); }
-                }, delayMs);
-            }
-            delayMs += 200L;
-        }
-        pendingWakeups.clear();
-    }
-
-    private void fireWakeup(Object serverManager, final int slot) {
-        try {
-            Method getState = cachedGetStateMethod;
-            if (getState == null) {
-                getState = serverManager.getClass()
-                        .getDeclaredMethod("g", int.class);
-                getState.setAccessible(true);
-                cachedGetStateMethod = getState;
-            }
-            final Object state = getState.invoke(serverManager, slot);
-            if (state == null) {
-                Log.i(TAG, "wake-up: no GamepadState for slot " + slot);
-                return;
-            }
-            // Wake-up via button-press flicker on a high button index that
-            // no real game maps. Wine's bus_sdl.c process_device_event
-            // *drops* button events on unregistered SDL_JoystickIDs (just
-            // logs a WARN — confirmed reading wine-10.0 source), so a
-            // button event on the SDL queue isn't what wakes things. The
-            // real wake-up comes from libvfs lazily emitting
-            // SDL_JOYDEVICEADDED on first-input. Empirically axis flicker
-            // failed for some slots in multi-controller setups but button
-            // flicker works (libvfs's poller appears to check button
-            // bytes for the lazy-attach trigger).
-            //
-            // Use button index 14 — outermost reachable via GamepadState.b
-            // (range check is `p1 < 0xf`, i.e. < 15) and unmapped by every
-            // XInput game (XInput defines 14 buttons, indices 0..13).
-            // Sequence: press, then release 50 ms later. If the user is
-            // genuinely chording button 14 mid-flicker the natural-input
-            // pipeline overwrites within ~16 ms; net effect is still a
-            // state change libvfs notices.
-            final Method writeButton;
-            Method cached = cachedWriteButtonMethod;
-            if (cached == null) {
-                cached = state.getClass()
-                        .getDeclaredMethod("b", int.class, boolean.class);
-                cached.setAccessible(true);
-                cachedWriteButtonMethod = cached;
-            }
-            writeButton = cached;
-            final int wakeButton = 14;
-            writeButton.invoke(state, wakeButton, true);
-            Log.i(TAG, "wake-up fired slot=" + slot
-                    + " button[" + wakeButton + "] press");
-            worker.postDelayed(new Runnable() {
-                @Override public void run() {
-                    try {
-                        writeButton.invoke(state, wakeButton, false);
-                        Log.i(TAG, "wake-up complete slot=" + slot);
-                    } catch (Throwable t) {
-                        Log.w(TAG, "wake-up release failed slot=" + slot, t);
-                    }
-                }
-            }, 50L);
-        } catch (Throwable t) {
-            Log.w(TAG, "wake-up failed slot=" + slot, t);
-        }
     }
 
     /**

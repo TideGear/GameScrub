@@ -2,8 +2,8 @@
 
 > **Built on the shoulders of [BannerHub](https://github.com/The412Banner/BannerHub) by [@The412Banner](https://github.com/The412Banner).**
 > The original 5.3.5-based BannerHub project pioneered the apktool-driven
-> patching pipeline, smali injection patterns, libevshim guest-side SDL
-> keepalive, and the entire vibration-mod architecture this fork is built
+> patching pipeline, smali injection patterns, the guest-side SDL
+> keepalive idea, and the vibration-mod architecture this fork is built
 > on. If you want the *full* set of GameHub enhancements (Amazon / Epic /
 > GOG store integration, Component Manager, RTS touch controls, HUD
 > overlays, root access management, frontend export, etc.), use BannerHub
@@ -23,41 +23,43 @@ What you get over stock GameHub:
   blends both motors into a single haptic pulse; this preserves the heavy
   / light distinction the way the game intended.
 - **Sustained rumble holds past 1 s.** SDL2's internal 1 s
-  `rumble_expiration` auto-stops sustained rumble on stock; an LD_PRELOAD
-  gate (`libevgate.so`) loads `libevshim.so` only inside `winedevice.exe`,
-  where the shim re-issues `SDL_JoystickRumble` every 500 ms with a 2 s
-  duration so the timer never fires.
-- **Experimental preload-free Wine patch.** For games that fail when
-  `libevshim.so` is mapped, the APK's launch-time Java hook patches the
-  app-owned `aarch64-unix/winebus.so` directly. The offline helper
+  `rumble_expiration` auto-stops sustained rumble on stock. The APK's
+  launch-time Java hook patches every app-owned `winebus.so` on disk so
+  the two non-zero `SDL_JoystickRumble` call sites pass `0xffffffff` as
+  the SDL duration; zero-duration stop calls still stop immediately. No
+  `LD_PRELOAD`, no extra `.so` mapped into the Wine subprocess address
+  space. The offline helper
   [scripts/patch_winebus_rumble_duration.py](scripts/patch_winebus_rumble_duration.py)
-  applies the same patch to extracted components. It changes only the two
-  nonzero SDL rumble start calls to pass `0xffffffff` as the SDL duration;
-  zero-duration stop calls still stop immediately.
+  applies the same patch to extracted components for offline use.
 - **Instant release** when the game stops rumble — no phantom-suppression
   timer extending the motor past the actual stop call.
 
-### Default Engine Keepalive
+### Preload-free architecture
 
-A small set of games silently exit at launch when `libevshim.so` is mapped
-into their Wine subprocess address space — verified to be pure mmap
-presence rather than symbol exports or constructor side effects. Wine's
-preloader is famously fussy about address-space layout; whatever it does
-for these specific games conflicts with our extra mapping. The first
-confirmed case is **Shotgun King: The Final Checkmate** (GameMaker Studio
-2), which exits ~700 ms after `boot job completed` with `normalExit=true`
-and no tombstone.
+Earlier builds preloaded `libevshim.so` (and later a tiny gate library
+`libevgate.so`) into every Wine subprocess to interpose `SDL_JoystickRumble`
+at runtime. A small set of games silently exit at launch when *any* extra
+`.so` is mapped into their Wine subprocess address space — verified to be
+pure mmap presence rather than symbol exports or constructor side effects.
+Wine's preloader is famously fussy about address-space layout, and the
+canonical case here is **Shotgun King: The Final Checkmate** (GameMaker
+Studio 2), which exited ~700 ms after `boot job completed` with
+`normalExit=true` and no tombstone whenever an extra preload was present.
 
-The APK defaults the winedevice-only keepalive path on for every Wine launch.
-The smali envbuilder patch ([scripts/apply_vibration_patches.py](scripts/apply_vibration_patches.py))
-calls [BhVibrationController.shouldPreloadEvshim()](extension/BhVibrationController.java)
-before adding `libevgate.so` to LD_PRELOAD; that method now always returns
-enabled so old per-game or global "Engine keepalive" settings cannot disable
-the Shotgun King test path. `libevgate.so` maps process-wide, but
-`libevshim.so` is only loaded in `winedevice.exe`.
+The current build avoids that entire failure mode by patching `winebus.so`
+on disk and adding nothing to `LD_PRELOAD`. The smali envbuilder patch
+([scripts/apply_vibration_patches.py](scripts/apply_vibration_patches.py))
+calls [BhVibrationController.ensureWinebusDurationPatchOnce()](extension/BhVibrationController.java)
+once per app process, immediately before the env builder hands off to the
+Wine launcher. The Java side scans the files tree for every `winebus.so`
+and rewrites the duration loads in place; an `AtomicBoolean` gates against
+repeat scans.
 
-The APK also attempts the Wine-side `winebus.so` duration patch once per app
-process before deciding whether to add `libevgate.so` to LD_PRELOAD.
+Currently the on-disk patch pattern matches the aarch64-unix `winebus.so`
+only. x86_64 containers will load with stock SDL behaviour (~1 s
+rumble auto-expiry) until an x86_64 instruction pattern is added — but
+the launch itself is no longer affected, so games that previously failed
+because of preload mappings now run.
 
 The PC Vibration Settings dialog only controls Mode and Intensity.
 
@@ -91,36 +93,26 @@ The pipeline:
 3. `python3 scripts/apply_vibration_patches.py` — four smali hooks
 4. (optional) `python3 scripts/apply_login_bypass.py` — patch the
    auth-state combiner + privacy-popup gate
-5. `cmake/ninja` build of `native/evshim/libevshim.so` and
-   `native/evshim/libevgate.so` for arm64-v8a
-6. `apktool b`
-7. `javac + d8` of the two `extension/Bh*.java` files → next free
+5. `apktool b`
+6. `javac + d8` of the two `extension/Bh*.java` files → next free
    `classesN.dex` slot (classes7), inject into the APK
-8. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
-9. Upload as `GameHub-Vibration-Fix-<version>.apk`
+7. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
+8. Upload as `GameHub-Vibration-Fix-<version>.apk`
 
 ## Project layout
 
 ```
 extension/
   BhVibrationController.java       singleton dispatcher (smali entry points,
-                                   per-game settings, keepalive thread)
-  BhVibrationSettingsActivity.java Mode/Intensity dialog UI
-
-native/evshim/
-  evgate.c                         tiny LD_PRELOAD gate; loads libevshim.so
-                                   only for winedevice.exe.
-  evshim.c, CMakeLists.txt         guest-side SDL keepalive shim. Patches
-                                   winebus.so's pSDL_JoystickRumble +
-                                   pSDL_JoystickClose .bss pointers so
-                                   sustained rumble survives SDL's 1 s
-                                   auto-expiry.
+                                   per-game settings, keepalive thread,
+                                   in-process winebus.so disk patcher).
+  BhVibrationSettingsActivity.java Mode/Intensity dialog UI.
 
 scripts/
   apply_vibration_patches.py       smali hooks against a decompiled
                                    apktool tree (6.0.2 or 6.0.4;
                                    version auto-detected from layout).
-  patch_winebus_rumble_duration.py experimental preload-free patch for
+  patch_winebus_rumble_duration.py offline preload-free patch for
                                    extracted aarch64-unix/winebus.so.
 
 .github/workflows/build.yml        CI build pipeline.

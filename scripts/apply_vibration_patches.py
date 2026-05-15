@@ -9,9 +9,10 @@ Hooks:
   1. GamepadServerManager.onRumble(III)V  — entry hook for the dispatcher
   2. <Physical>.g(II)V                     — per-controller rumble dispatch
   3. <Physical>.f()V                       — stop hook for keepalive cleanup
-  4. <EnvBuilder>.smali LD_PRELOAD path    — prepend libevgate.so, which
-                                             loads libevshim.so only inside
-                                             winedevice.exe
+  4. <EnvBuilder>.smali pre-launch hook    — call BhVibrationController to
+                                             patch every winebus.so on disk
+                                             once per app process (preload-
+                                             free SDL rumble keepalive)
 
 Per-version ProGuard rename maps are baked into RENAMES_6X below.
 
@@ -226,12 +227,21 @@ def apply_6x(root: Path, version: str) -> None:
         f"{phys}.f(): inject BhVibrationController.onStop keepalive-map cleanup"
     )
 
-    # Patch 4: <EnvBuilder>.smali — prepend libevgate.so to LD_PRELOAD list.
-    # In the LD_PRELOAD building method (a(L<...>;Ljava/lang/String;Z)V,
-    # .locals 35), v12 is the ArrayList<String> being built and v0 is
-    # `this`. Inject just before the joinToString(":") call. Use registers
-    # v13..v15 (about to be overwritten anyway by the join setup that
-    # follows our injection).
+    # Patch 4: <EnvBuilder>.smali — fire the BhVibrationController disk
+    # patcher exactly once per app process, right before the env builder
+    # hands off to the Wine launcher. The Java side scans the app's files
+    # tree for every winebus.so and rewrites the two non-zero
+    # SDL_JoystickRumble call sites to pass 0xffffffff as the duration so
+    # SDL's ~1 s rumble_expiration never fires; zero-duration stop calls
+    # are separate sites and stay untouched. No LD_PRELOAD modification —
+    # this is the preload-free path that avoids the Wine-preloader address-
+    # space sensitivity that silently exits a small set of games (Shotgun
+    # King is the canonical case) whenever any extra .so is mapped into
+    # their Wine subprocess address space.
+    #
+    # In the env builder method (a(L<...>;Ljava/lang/String;Z)V, .locals 35),
+    # v0 is `this` and v13 is clobbered immediately after this block by the
+    # joinToString setup that follows, so it's safe to reuse here.
     #
     # Anchor: the unique prefix block setting up the join (v16=0, v17=0x3e,
     # v13=":", v14=0, v15=0) immediately followed by the joinToString$default
@@ -262,37 +272,11 @@ def apply_6x(root: Path, version: str) -> None:
         "\n"
         "    .line 465\n"
         f"    invoke-static/range {{v12 .. v17}}, {join_signature}\n",
-        "    # BH: prepend libevgate.so to LD_PRELOAD list (winedevice-only SDL keepalive)\n"
-        f"    # v0 = this ({env}), v12 = ArrayList<String>. v13..v15 are clobbered\n"
-        "    # by the join setup right after this block, so safe to reuse.\n"
-        "    #\n"
-        "    # BhVibrationController currently defaults this on unconditionally\n"
-        "    # so stale per-game/global prefs cannot disable the SK test path.\n"
-        "    # libevgate itself is mapped process-wide, but it dlopen()s\n"
-        "    # libevshim.so only when /proc/self/cmdline is winedevice.exe.\n"
+        "    # BH: preload-free SDL rumble keepalive — patch every winebus.so\n"
+        "    # on disk once per app process. AtomicBoolean inside the Java\n"
+        "    # method gates against repeat scans. No LD_PRELOAD changes.\n"
         f"    iget-object v13, v0, L{env};->a:Landroid/content/Context;\n"
-        "    invoke-static {v13}, Lcom/xj/winemu/vibration/BhVibrationController;->shouldPreloadEvshim(Landroid/content/Context;)Z\n"
-        "    move-result v14\n"
-        "    if-eqz v14, :bh_skip_evshim_preload\n"
-        "\n"
-        "    invoke-virtual {v13}, Landroid/content/Context;->getApplicationInfo()Landroid/content/pm/ApplicationInfo;\n"
-        "    move-result-object v13\n"
-        "    iget-object v13, v13, Landroid/content/pm/ApplicationInfo;->nativeLibraryDir:Ljava/lang/String;\n"
-        "    new-instance v14, Ljava/lang/StringBuilder;\n"
-        "    invoke-direct {v14}, Ljava/lang/StringBuilder;-><init>()V\n"
-        "    invoke-virtual {v14, v13}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;\n"
-        "    const-string v13, \"/libevgate.so\"\n"
-        "    invoke-virtual {v14, v13}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;\n"
-        "    invoke-virtual {v14}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;\n"
-        "    move-result-object v13\n"
-        "    new-instance v14, Ljava/io/File;\n"
-        "    invoke-direct {v14, v13}, Ljava/io/File;-><init>(Ljava/lang/String;)V\n"
-        "    invoke-virtual {v14}, Ljava/io/File;->exists()Z\n"
-        "    move-result v15\n"
-        "    if-eqz v15, :bh_skip_evshim_preload\n"
-        "    const/4 v15, 0x0\n"
-        "    invoke-virtual {v12, v15, v13}, Ljava/util/ArrayList;->add(ILjava/lang/Object;)V\n"
-        "    :bh_skip_evshim_preload\n"
+        "    invoke-static {v13}, Lcom/xj/winemu/vibration/BhVibrationController;->ensureWinebusDurationPatchOnce(Landroid/content/Context;)V\n"
         "\n"
         "    const/16 v16, 0x0\n"
         "\n"
@@ -313,7 +297,7 @@ def apply_6x(root: Path, version: str) -> None:
         "\n"
         "    .line 465\n"
         f"    invoke-static/range {{v12 .. v17}}, {join_signature}\n",
-        f"{env}.a(...): prepend libevgate.so to LD_PRELOAD list"
+        f"{env}.a(...): pre-launch winebus disk-patch trigger (preload-free)"
     )
 
 
