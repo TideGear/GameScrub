@@ -377,10 +377,9 @@ public final class BhVibrationController {
     public int getMode() { return cachedMode; }
     public int getIntensity() { return cachedIntensity; }
 
-    /** Per-game opt-out for the engine keepalive preload. Reads from the current
-     *  containerGameId's pc_g_setting<gameId> file. Returns true if the
-     *  user hasn't unchecked the toggle (default) or there's no per-game
-     *  scope. See shouldPreloadEvshim for the launch-time consumer. */
+    /** Legacy per-game engine keepalive preference reader. The launch path now
+     *  defaults the winedevice-only gate on in shouldPreloadEvshim(), so this
+     *  value is intentionally not consulted there. */
     public boolean isEvshimEnabledForCurrentContainer() {
         if (containerGameId == null || appContext == null) return true;
         try {
@@ -392,9 +391,8 @@ public final class BhVibrationController {
         }
     }
 
-    /** Settings UI writes the per-game evshim toggle. Persists only when a
-     *  game is in scope — there's no global default for this one (it's
-     *  intentionally opt-out per problematic game, not a global preference). */
+    /** Legacy per-game engine keepalive preference writer. Kept for older
+     *  smali/UI callers, but current builds do not expose this setting. */
     public void setEvshimEnabledForCurrentContainer(boolean enabled) {
         if (containerGameId == null || appContext == null) return;
         try {
@@ -517,7 +515,7 @@ public final class BhVibrationController {
             Log.i(TAG, "shouldPreloadEvshim=true (default winedevice-only gate)");
             return true;
         } catch (Throwable t) {
-            Log.w(TAG, "shouldPreloadEvshim failed — defaulting to enabled", t);
+            Log.w(TAG, "shouldPreloadEvshim failed - defaulting to enabled", t);
             return true;
         }
     }
