@@ -29,6 +29,34 @@ What you get over stock GameHub:
 - **Instant release** when the game stops rumble — no phantom-suppression
   timer extending the motor past the actual stop call.
 
+### Per-game "Engine keepalive" toggle
+
+A small set of games silently exit at launch when `libevshim.so` is mapped
+into their Wine subprocess address space — verified to be pure mmap
+presence rather than symbol exports or constructor side effects. Wine's
+preloader is famously fussy about address-space layout; whatever it does
+for these specific games conflicts with our extra mapping. The first
+confirmed case is **Shotgun King: The Final Checkmate** (GameMaker Studio
+2), which exits ~700 ms after `boot job completed` with `normalExit=true`
+and no tombstone.
+
+The PC Vibration Settings dialog (long-press a game → settings → PC
+Vibration) has an **"Engine keepalive"** checkbox that defaults checked.
+Uncheck it for any game that fails to launch — the smali envbuilder
+patch ([scripts/apply_vibration_patches.py](scripts/apply_vibration_patches.py))
+calls
+[BhVibrationController.shouldPreloadEvshim()](extension/BhVibrationController.java)
+before adding libevshim to LD_PRELOAD; if the per-game pref
+(`bh_evshim_enabled` under `pc_g_setting<gameId>`) is false, the prepend
+is skipped, libevshim never enters that launch's LD_PRELOAD, and the
+dynamic linker never maps it into the Wine subprocess. Tradeoff for the
+disabled game: SDL's 1 s rumble auto-expiry kicks back in, so sustained
+rumble cuts at one second. Dual-motor dispatch and instant release still
+work (smali patches 1–3 are independent of libevshim).
+
+The toggle's setting lives under the same `pc_g_setting<gameId>` file as
+Mode/Intensity, so it round-trips through Export/Import the same way.
+
 ## Build
 
 CI workflow: `.github/workflows/build.yml` — triggers on `workflow_dispatch`

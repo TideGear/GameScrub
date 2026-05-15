@@ -14,6 +14,8 @@ import android.view.ViewGroup;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -172,6 +174,30 @@ public class BhVibrationSettingsActivity extends Activity {
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         root.addView(controlsRow);
+
+        // Per-game "Engine keepalive" toggle. Default checked (libevshim
+        // preloaded so SDL's 1 s rumble auto-expiry is suppressed and
+        // sustained rumble holds past 1 s). Some games (Shotgun King
+        // confirmed) silently fail to launch when libevshim is mapped
+        // into their Wine subprocess address space — uncheck here for
+        // those games and the smali envbuilder skips the LD_PRELOAD
+        // entry. Per-game; only meaningful when there's a gameId scope.
+        final CheckBox evshimToggle = new CheckBox(this);
+        evshimToggle.setText("Engine keepalive (uncheck if this game fails to launch)");
+        evshimToggle.setTextColor(Color.WHITE);
+        evshimToggle.setTextSize(12);
+        evshimToggle.setChecked(ctl.isEvshimEnabledForCurrentContainer());
+        evshimToggle.setEnabled(gameId != null && !gameId.isEmpty());
+        evshimToggle.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override public void onCheckedChanged(CompoundButton b, boolean isChecked) {
+                ctl.setEvshimEnabledForCurrentContainer(isChecked);
+            }
+        });
+        LinearLayout.LayoutParams evshimLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        evshimLp.topMargin = dp(8);
+        evshimToggle.setLayoutParams(evshimLp);
+        root.addView(evshimToggle);
 
         // Tiny one-line tip — much shorter than the previous paragraph
         // and only really useful on first launch. Ellipsizes if too long.

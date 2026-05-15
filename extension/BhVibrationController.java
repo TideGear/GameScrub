@@ -84,6 +84,14 @@ public final class BhVibrationController {
     public static final String PER_GAME_PREFS_FMT = "pc_g_setting%s";
     public static final String PER_GAME_KEY_MODE      = "bh_vibration_mode";
     public static final String PER_GAME_KEY_INTENSITY = "bh_vibration_intensity";
+    /** Per-game opt-out for the libevshim LD_PRELOAD keepalive. Some games
+     *  (notably Shotgun King) silently exit at launch when libevshim is
+     *  mapped into their Wine subprocess address space — verified to be
+     *  pure mmap presence rather than symbols or ctor work. Default true
+     *  (keep keepalive enabled) so other games keep sustained-rumble
+     *  behaviour; user unchecks per-game via BhVibrationSettingsActivity
+     *  to skip libevshim from LD_PRELOAD for that specific game. */
+    public static final String PER_GAME_KEY_EVSHIM    = "bh_evshim_enabled";
     public static final String GLOBAL_KEY_MODE      = "mode";
     public static final String GLOBAL_KEY_INTENSITY = "intensity";
 
@@ -347,6 +355,38 @@ public final class BhVibrationController {
     public int getMode() { return cachedMode; }
     public int getIntensity() { return cachedIntensity; }
 
+    /** Per-game opt-out for libevshim preload. Reads from the current
+     *  containerGameId's pc_g_setting<gameId> file. Returns true if the
+     *  user hasn't unchecked the toggle (default) or there's no per-game
+     *  scope. See shouldPreloadEvshim for the launch-time consumer. */
+    public boolean isEvshimEnabledForCurrentContainer() {
+        if (containerGameId == null || appContext == null) return true;
+        try {
+            SharedPreferences perGame = appContext.getSharedPreferences(
+                    String.format(PER_GAME_PREFS_FMT, containerGameId), Context.MODE_PRIVATE);
+            return perGame.getBoolean(PER_GAME_KEY_EVSHIM, true);
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /** Settings UI writes the per-game evshim toggle. Persists only when a
+     *  game is in scope — there's no global default for this one (it's
+     *  intentionally opt-out per problematic game, not a global preference). */
+    public void setEvshimEnabledForCurrentContainer(boolean enabled) {
+        if (containerGameId == null || appContext == null) return;
+        try {
+            appContext.getSharedPreferences(
+                            String.format(PER_GAME_PREFS_FMT, containerGameId), Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(PER_GAME_KEY_EVSHIM, enabled)
+                    .apply();
+            Log.i(TAG, "evshim=" + enabled + " for container=" + containerGameId);
+        } catch (Throwable t) {
+            Log.w(TAG, "setEvshimEnabledForCurrentContainer failed", t);
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Smali entry 1: GamepadServerManager.onRumble(slot, low, high)
     //   Return true  → caller short-circuits (device-only or off).
@@ -425,6 +465,128 @@ public final class BhVibrationController {
         } catch (Throwable t) {
             Log.w(TAG, "scheduleWakeup failed", t);
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Smali entry 5: bg5.a env builder (LD_PRELOAD construction).
+    //
+    // The vibration patch normally prepends <nativeLibDir>/libevshim.so to
+    // LD_PRELOAD for every Wine subprocess so winedevice.exe gets the SDL
+    // keepalive. Empirically a small set of games (Shotgun King is the
+    // first confirmed case) silently exit at launch when libevshim is
+    // mmap'd into their Wine subprocess address space — confirmed via
+    // diagnostic builds to be the .so's pure mmap presence rather than
+    // symbol exports or constructor side effects. Wine's preloader is
+    // famously fussy about address-space layout; whatever it does for
+    // these specific games conflicts with our extra mapping.
+    //
+    // The smali patch in bg5.a() calls this from the LD_PRELOAD builder
+    // BEFORE adding libevshim to the env list. We resolve the launching
+    // game from the live WineActivity in the activity stack, read its
+    // pc_g_setting<gameId> pref for "bh_evshim_enabled", and return false
+    // if the user has unchecked the per-game keepalive toggle. Default
+    // true (no pref written) preserves stock behaviour for every other
+    // game.
+    //
+    // Returning false here causes the smali helper to skip the
+    // ArrayList.add() — libevshim is never added to LD_PRELOAD, the
+    // dynamic linker never maps it into Wine subprocess address space,
+    // and the game launches normally. Tradeoff for the disabled game:
+    // SDL's 1 s rumble auto-expiry kicks in, so sustained rumble cuts
+    // at one second. Smali patches 1-3 still work (dual-motor dispatch +
+    // instant release).
+    // ─────────────────────────────────────────────────────────────────────────
+    public static boolean shouldPreloadEvshim(Context ctx) {
+        try {
+            if (ctx == null) return true;
+            // Global override: <filesDir>/.bh_skip_evshim. Takes precedence
+            // over per-game so users have a deterministic escape hatch for
+            // the case where bg5.a() runs before WineActivity reaches the
+            // activity stack (per-game pref can't be located until then,
+            // and we don't want to crash a problematic game even once
+            // before the per-game toggle takes effect). Setting/clearing
+            // this marker is what the Settings UI's "Engine keepalive"
+            // checkbox does.
+            if (new File(ctx.getFilesDir(), ".bh_skip_evshim").exists()) {
+                Log.i(TAG, "shouldPreloadEvshim=false (global marker)");
+                return false;
+            }
+            String gameId = resolveLaunchingGameId();
+            if (gameId == null) {
+                // No WineActivity in scope yet — first launch flow may
+                // call into bg5.a() before the activity is registered. Be
+                // conservative and preload; the user can flip the global
+                // marker if they hit a game that breaks on first launch.
+                return true;
+            }
+            SharedPreferences perGame = ctx.getSharedPreferences(
+                    String.format(PER_GAME_PREFS_FMT, gameId), Context.MODE_PRIVATE);
+            boolean enabled = perGame.getBoolean(PER_GAME_KEY_EVSHIM, true);
+            Log.i(TAG, "shouldPreloadEvshim gameId=" + gameId + " enabled=" + enabled);
+            return enabled;
+        } catch (Throwable t) {
+            Log.w(TAG, "shouldPreloadEvshim failed — defaulting to enabled", t);
+            return true;
+        }
+    }
+
+    /** Settings-UI helper: global enable/disable for libevshim preload.
+     *  Writes/deletes the <filesDir>/.bh_skip_evshim marker. */
+    public static void setEvshimGlobalEnabled(Context ctx, boolean enabled) {
+        if (ctx == null) return;
+        try {
+            File marker = new File(ctx.getFilesDir(), ".bh_skip_evshim");
+            if (enabled) {
+                if (marker.exists()) marker.delete();
+            } else if (!marker.exists()) {
+                marker.createNewFile();
+            }
+            Log.i(TAG, "evshim global preload " + (enabled ? "ENABLED" : "DISABLED"));
+        } catch (Throwable t) {
+            Log.w(TAG, "setEvshimGlobalEnabled failed", t);
+        }
+    }
+
+    /** Settings-UI helper: current global toggle state. */
+    public static boolean isEvshimGlobalEnabled(Context ctx) {
+        if (ctx == null) return true;
+        try {
+            return !new File(ctx.getFilesDir(), ".bh_skip_evshim").exists();
+        } catch (Throwable t) {
+            return true;
+        }
+    }
+
+    /** Walk the live-activity table for any WineActivity and pull its
+     *  "gameId" Intent extra. Same approach as
+     *  maybeResolveContainerFromActivityStack but exposed as a static
+     *  query so the env-builder helper (called pre-Wine-spawn) can use
+     *  it without needing a controller instance. */
+    private static String resolveLaunchingGameId() {
+        try {
+            Class<?> atCls = Class.forName("android.app.ActivityThread");
+            Method cur = atCls.getMethod("currentActivityThread");
+            Object at = cur.invoke(null);
+            if (at == null) return null;
+            java.lang.reflect.Field fActs = atCls.getDeclaredField("mActivities");
+            fActs.setAccessible(true);
+            Object acts = fActs.get(at);
+            if (!(acts instanceof Map)) return null;
+            for (Object recordObj : ((Map<?, ?>) acts).values()) {
+                if (recordObj == null) continue;
+                java.lang.reflect.Field fAct = recordObj.getClass().getDeclaredField("activity");
+                fAct.setAccessible(true);
+                Object activity = fAct.get(recordObj);
+                if (!(activity instanceof android.app.Activity)) continue;
+                String clsName = activity.getClass().getName();
+                if (!clsName.endsWith(".WineActivity")) continue;
+                android.content.Intent it = ((android.app.Activity) activity).getIntent();
+                if (it == null) continue;
+                String gid = it.getStringExtra("gameId");
+                if (gid != null && !gid.isEmpty()) return gid;
+            }
+        } catch (Throwable ignored) { }
+        return null;
     }
 
 
