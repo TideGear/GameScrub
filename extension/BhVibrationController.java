@@ -158,49 +158,51 @@ public final class BhVibrationController {
     // x86_64 SDL_JoystickRumble / SDL_JoystickRumbleTriggers call-site detection.
     //
     // Wine's bus_sdl.c sdl_device_haptics_start passes `duration_ms` as the
-    // 4th argument to both pSDL_JoystickRumble and pSDL_JoystickRumbleTriggers.
-    // In System V x86_64 the 4th arg lives in ECX, so just before each
-    // indirect call the compiler emits a `mov ecx, <duration_slot>` followed
-    // by `call qword ptr [rip+disp32]`. The duration slot is the same stack
-    // location for both calls (compiler-saved at function entry).
+    // 4th argument (ECX in System V x86_64) to both pSDL_JoystickRumble and
+    // pSDL_JoystickRumbleTriggers. The compiler clang/NDK r26 we observed in
+    // wine_proton9.0-x64-3 loads the function pointer into RAX first, then
+    // sets up args, then issues `call *%rax`. Each call site looks like:
     //
-    // Two encodings of the duration load we accept:
-    //   "8B 4D <disp8> FF 15 <disp32>"      mov ecx, [rbp+disp8]; call [rip+disp32]   (9 bytes)
-    //   "8B 4C 24 <disp8> FF 15 <disp32>"   mov ecx, [rsp+disp8]; call [rip+disp32]  (10 bytes)
-    // Fixed positions are validated via WILDCARD_FIXED_*; disp bytes float.
+    //     8B 4D <disp8>     mov   ecx, DWORD PTR [rbp+disp8]   ; duration_ms
+    //     0F B7 F6          movzwl %si, %esi                    ; 2nd arg fixup
+    //     0F B7 D2          movzwl %dx, %edx                    ; 3rd arg fixup
+    //     FF D0             call  *%rax
     //
-    // We patch the `mov ecx, ...` instruction to `or ecx, -1` (83 C9 FF), which
-    // sets ECX = 0xFFFFFFFF in 3 bytes regardless of its prior value, then pad
-    // with NOPs (0x90) to keep the instruction length identical so RIP-relative
-    // call disp32 is untouched. Zero-duration stop paths are separate call
-    // sites with a different (zero immediate / xor) load and are left alone.
+    // That's an 11-byte window where 10 bytes are fixed and only the disp8
+    // floats. The movzwl pair is the discriminator: the corresponding
+    // sdl_device_haptics_stop path is `xor ecx, ecx; mov esi, ecx; mov edx,
+    // ecx; call *%rax` which doesn't match this signature, so we won't touch
+    // the stop sites.
     //
-    // Heuristic: scan both encodings, require exactly 2 matches of one of them
-    // before patching. 0 or >2 → skip (and dump the file under
-    // <externalFilesDir>/winebus_dump_x86_64.so for offline refinement).
-    private static final byte[] X86_64_PATCHED_LOAD_3 = new byte[] {
-            (byte) 0x83, (byte) 0xc9, (byte) 0xff                  // or ecx, -1
+    // Patch: replace the 3-byte `mov ecx, [rbp+disp8]` with `or ecx, -1`
+    // (83 C9 FF). ECX becomes 0xFFFFFFFF regardless of prior value; the rest
+    // of the 11-byte window is preserved, so the RIP-relative loads and the
+    // indirect call all stay valid.
+    //
+    // Heuristic: exactly 2 matches required. 0 or >2 → skip and dump the
+    // file under <externalFilesDir>/winebus_dump_x86_64.so for offline
+    // refinement (e.g. if a different proton build emits a reordered arg
+    // sequence or a different addressing mode).
+    private static final byte[] X86_64_PATCHED_LOAD = new byte[] {
+            (byte) 0x83, (byte) 0xc9, (byte) 0xff   // or ecx, -1
     };
-    private static final byte[] X86_64_PATCHED_LOAD_4 = new byte[] {
-            (byte) 0x83, (byte) 0xc9, (byte) 0xff, (byte) 0x90     // or ecx, -1 ; nop
-    };
-    // Pattern A: mov ecx, [rbp+disp8]; call [rip+disp32]
-    private static final byte[] X86_64_PATTERN_A = new byte[] {
+    private static final byte[] X86_64_PATTERN = new byte[] {
             (byte) 0x8b, (byte) 0x4d, 0x00,
-            (byte) 0xff, (byte) 0x15, 0x00, 0x00, 0x00, 0x00
+            (byte) 0x0f, (byte) 0xb7, (byte) 0xf6,
+            (byte) 0x0f, (byte) 0xb7, (byte) 0xd2,
+            (byte) 0xff, (byte) 0xd0
     };
-    private static final boolean[] X86_64_PATTERN_A_FIXED = new boolean[] {
+    private static final boolean[] X86_64_PATTERN_FIXED = new boolean[] {
             true,  true,  false,
-            true,  true,  false, false, false, false
+            true,  true,  true,
+            true,  true,  true,
+            true,  true
     };
-    // Pattern B: mov ecx, [rsp+disp8]; call [rip+disp32]
-    private static final byte[] X86_64_PATTERN_B = new byte[] {
-            (byte) 0x8b, (byte) 0x4c, (byte) 0x24, 0x00,
-            (byte) 0xff, (byte) 0x15, 0x00, 0x00, 0x00, 0x00
-    };
-    private static final boolean[] X86_64_PATTERN_B_FIXED = new boolean[] {
-            true,  true,  true,  false,
-            true,  true,  false, false, false, false
+    private static final byte[] X86_64_PATCHED_PATTERN = new byte[] {
+            (byte) 0x83, (byte) 0xc9, (byte) 0xff,
+            (byte) 0x0f, (byte) 0xb7, (byte) 0xf6,
+            (byte) 0x0f, (byte) 0xb7, (byte) 0xd2,
+            (byte) 0xff, (byte) 0xd0
     };
 
     public static BhVibrationController getInstance() {
@@ -625,73 +627,29 @@ public final class BhVibrationController {
     }
 
     private static int patchX86_64Sites(File file, byte[] blob, RandomAccessFile raf) throws IOException {
-        int[] hitsA = new int[8];
-        int[] hitsB = new int[8];
-        int countA = collectWildcardHits(blob, X86_64_PATTERN_A, X86_64_PATTERN_A_FIXED, hitsA);
-        int countB = collectWildcardHits(blob, X86_64_PATTERN_B, X86_64_PATTERN_B_FIXED, hitsB);
+        int[] hits = new int[8];
+        int originalCount = collectWildcardHits(blob, X86_64_PATTERN, X86_64_PATTERN_FIXED, hits);
+        int patchedCount = collectHits(blob, X86_64_PATCHED_PATTERN, null);
 
-        // Already-patched detection: the `mov ecx, ...` slot is now `83 C9 FF`,
-        // immediately followed by NOPs / unchanged call. Count adjacent
-        // "83 C9 FF" + FF 15 patterns; both call sites patched if exactly 2.
-        int patchedCount = collectX86_64PatchedHits(blob);
-        if (countA == 0 && countB == 0 && patchedCount == 2) {
+        if (originalCount == 0 && patchedCount == 2) {
             Log.i(TAG, "winebus duration patch already applied path=" + file.getAbsolutePath());
             return 2;
         }
-
-        int[] hits;
-        byte[] replacement;
-        String encoding;
-        if (countA == 2 && countB == 0) {
-            hits = hitsA;
-            replacement = X86_64_PATCHED_LOAD_3;   // mov ecx,[rbp+disp8] is 3 bytes → 3-byte replacement
-            encoding = "rbp-relative";
-        } else if (countB == 2 && countA == 0) {
-            hits = hitsB;
-            replacement = X86_64_PATCHED_LOAD_4;   // mov ecx,[rsp+disp8] is 4 bytes → 3-byte + NOP
-            encoding = "rsp-relative";
-        } else {
+        if (originalCount != 2) {
             Log.i(TAG, "winebus duration patch skipped pattern mismatch (x86_64)"
-                    + " rbp_hits=" + countA + " rsp_hits=" + countB
-                    + " patched=" + patchedCount
+                    + " original=" + originalCount + " patched=" + patchedCount
                     + " path=" + file.getAbsolutePath());
             return 0;
         }
 
         for (int i = 0; i < 2; i++) {
             raf.seek(hits[i]);
-            raf.write(replacement);
+            raf.write(X86_64_PATCHED_LOAD);
         }
-        Log.i(TAG, "winebus duration patch applied (x86_64 " + encoding + ") path="
-                + file.getAbsolutePath()
+        Log.i(TAG, "winebus duration patch applied (x86_64) path=" + file.getAbsolutePath()
                 + " offsets=0x" + Integer.toHexString(hits[0])
                 + ",0x" + Integer.toHexString(hits[1]));
         return 1;
-    }
-
-    // Count "83 C9 FF" preceding "FF 15" within the next 1-2 bytes (accounting
-    // for an optional NOP), which marks a previously-patched x86_64 call site.
-    private static int collectX86_64PatchedHits(byte[] blob) {
-        int count = 0;
-        int max = blob.length - 5;
-        for (int i = 0; i <= max; i++) {
-            if (blob[i] != (byte) 0x83) continue;
-            if (blob[i + 1] != (byte) 0xc9) continue;
-            if (blob[i + 2] != (byte) 0xff) continue;
-            // rbp-form: 83 C9 FF FF 15
-            if (blob[i + 3] == (byte) 0xff && blob[i + 4] == (byte) 0x15) {
-                count++;
-                continue;
-            }
-            // rsp-form: 83 C9 FF 90 FF 15 (NOP padding)
-            if (i + 5 < blob.length
-                    && blob[i + 3] == (byte) 0x90
-                    && blob[i + 4] == (byte) 0xff
-                    && blob[i + 5] == (byte) 0x15) {
-                count++;
-            }
-        }
-        return count;
     }
 
     private static int collectWildcardHits(byte[] blob, byte[] pattern, boolean[] fixed, int[] hits) {

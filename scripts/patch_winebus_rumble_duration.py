@@ -16,21 +16,23 @@ We replace the load with `mov w3, #-1` so the 4th argument becomes
 0xffffffff (~50 days), defeating SDL2's internal rumble auto-expiry.
 
 On x86_64 (System V ABI) the same logic loads duration_ms into ECX (4th
-arg) immediately before an indirect call through the .got/.plt slot.
-The compiler emits one of:
+arg). In the clang/NDK-r26 build shipped with wine_proton9.0-x64-3 the
+compiler loads the function pointer into RAX first, then sets up args and
+issues `call *%rax`. Each call site is an 11-byte window:
 
-    mov  ecx, DWORD PTR [rbp+disp8] ; 3 bytes
-    call QWORD PTR [rip+disp32]     ; 6 bytes
+    8B 4D <disp8>     mov   ecx, DWORD PTR [rbp+disp8]   ; duration_ms
+    0F B7 F6          movzwl %si, %esi                    ; 2nd arg fixup
+    0F B7 D2          movzwl %dx, %edx                    ; 3rd arg fixup
+    FF D0             call  *%rax
 
-or, when frame pointer is omitted:
+10 of 11 bytes fixed; only the disp8 floats. The movzwl pair discriminates
+this from the haptics_stop call site (which uses xor/mov-reg-to-reg for
+the same args and so doesn't match). We replace the first 3 bytes with
+`or ecx, -1` (83 C9 FF) so ECX becomes 0xFFFFFFFF; the rest of the window
+is preserved so the indirect call is untouched.
 
-    mov  ecx, DWORD PTR [rsp+disp8] ; 4 bytes
-    call QWORD PTR [rip+disp32]     ; 6 bytes
-
-We replace the mov with `or ecx, -1` (83 C9 FF, 3 bytes) plus a 0x90 NOP
-when needed to preserve instruction length so the rip-relative call disp32
-remains valid. Two matches expected (rumble + rumble triggers); 0 or >2
-hits is treated as ambiguous and skipped to avoid a destructive miss.
+Two matches expected (rumble + rumble triggers); 0 or >2 hits is treated
+as ambiguous and skipped to avoid a destructive miss.
 
 Zero-duration stop paths are separate call sites and remain untouched on
 both architectures.
@@ -56,21 +58,18 @@ AARCH64_PATCHED_SITE  = AARCH64_PATCHED_DURATION_LOAD + AARCH64_INDIRECT_CALL_X8
 # ---------------------------------------------------------------------------
 # x86_64 — wildcards represented as (bytes, mask) where mask byte 0xff means
 # "must match" and 0x00 means "wildcard".
+#
+# 11-byte window:
+#   mov ecx, [rbp+disp8] ; movzwl si,esi ; movzwl dx,edx ; call *%rax
+# Only the disp8 floats. Replace bytes 0..2 with `or ecx, -1` (83 C9 FF).
 # ---------------------------------------------------------------------------
 
-# mov ecx, [rbp+disp8] ; call [rip+disp32]
-X86_64_PATTERN_RBP = (
-    bytes.fromhex("8b 4d 00  ff 15 00 00 00 00"),
-    bytes.fromhex("ff ff 00  ff ff 00 00 00 00"),
+X86_64_PATTERN = (
+    bytes.fromhex("8b 4d 00  0f b7 f6  0f b7 d2  ff d0"),
+    bytes.fromhex("ff ff 00  ff ff ff  ff ff ff  ff ff"),
 )
-# mov ecx, [rsp+disp8] ; call [rip+disp32]
-X86_64_PATTERN_RSP = (
-    bytes.fromhex("8b 4c 24 00  ff 15 00 00 00 00"),
-    bytes.fromhex("ff ff ff 00  ff ff 00 00 00 00"),
-)
-
-X86_64_PATCHED_LOAD_RBP = bytes.fromhex("83 c9 ff")        # or ecx, -1
-X86_64_PATCHED_LOAD_RSP = bytes.fromhex("83 c9 ff 90")     # or ecx, -1 ; nop
+X86_64_PATCHED_PATTERN = bytes.fromhex("83 c9 ff  0f b7 f6  0f b7 d2  ff d0")
+X86_64_PATCHED_LOAD = bytes.fromhex("83 c9 ff")
 
 
 ELF_MACHINE_AARCH64 = 0xb7
@@ -154,34 +153,39 @@ def patch_aarch64(path: Path, blob: bytes, *, dry_run: bool) -> bool:
 
 
 def patch_x86_64(path: Path, blob: bytes, *, dry_run: bool) -> bool:
-    hits_rbp = find_all_masked(blob, *X86_64_PATTERN_RBP)
-    hits_rsp = find_all_masked(blob, *X86_64_PATTERN_RSP)
+    hits = find_all_masked(blob, *X86_64_PATTERN)
+    patched_hits = find_all(blob, X86_64_PATCHED_PATTERN)
 
-    if len(hits_rbp) == 2 and len(hits_rsp) == 0:
-        hits = hits_rbp
-        replacement = X86_64_PATCHED_LOAD_RBP
-        encoding = "rbp-relative"
-    elif len(hits_rsp) == 2 and len(hits_rbp) == 0:
-        hits = hits_rsp
-        replacement = X86_64_PATCHED_LOAD_RSP
-        encoding = "rsp-relative"
-    else:
+    if not hits:
+        if len(patched_hits) == 2:
+            print(f"OK: {path} already patched (x86_64) at "
+                  f"{', '.join(hex(x) for x in patched_hits)}")
+            return False
         raise ValueError(
-            f"{path}: expected exactly 2 x86_64 rumble call sites of one "
-            f"encoding, found rbp={len(hits_rbp)} rsp={len(hits_rsp)}"
+            f"{path}: expected 2 original x86_64 rumble call sites, "
+            f"found 0 original and {len(patched_hits)} patched"
+        )
+    if len(hits) != 2:
+        raise ValueError(
+            f"{path}: expected exactly 2 original x86_64 rumble call sites, "
+            f"found {len(hits)} at {', '.join(hex(x) for x in hits)}"
         )
 
-    print(f"PATCH (x86_64 {encoding}): {path}")
+    print(f"PATCH (x86_64): {path}")
     for off in hits:
-        print(f"  file+{off:#x}: mov ecx, [duration] -> or ecx, -1")
+        print(f"  file+{off:#x}: mov ecx, [rbp+disp8] -> or ecx, -1")
 
     if dry_run:
         return True
 
     mutable = bytearray(blob)
     for off in hits:
-        mutable[off:off + len(replacement)] = replacement
+        mutable[off:off + len(X86_64_PATCHED_LOAD)] = X86_64_PATCHED_LOAD
     path.write_bytes(mutable)
+
+    verify = path.read_bytes()
+    if find_all_masked(verify, *X86_64_PATTERN) or len(find_all(verify, X86_64_PATCHED_PATTERN)) != 2:
+        raise RuntimeError(f"{path}: x86_64 verification failed after write")
     return True
 
 
