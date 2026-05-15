@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Apply login-bypass patches to a decompiled GameHub apktool tree.
-Supports stock 6.0.2 and 6.0.4.
+Supports stock 6.0.4 only — 5.3.5 uses a different auth flow that this
+build does not currently bypass.
 
 Effect: make the app's "is logged in" gate report true unconditionally
 so the launcher Activity proceeds straight to the home screen instead
@@ -35,10 +36,9 @@ Locator strategy — by signature, not by class name
 --------------------------------------------------
 Both the auth-state combiner and the preference wrapper are
 R8-obfuscated to two- or three-letter class names that shift between
-minor 6.0.x releases (e.g. 6.0.2 `dt0`/`dyj`, 6.0.4 `et0`/`kyj`).
-Rather than hardcode names, we scan `smali_classes4/` for the
-distinctive signatures and bail with a clear error if zero or more
-than one class matches.
+minor 6.0.x releases (e.g. 6.0.4 `et0`/`kyj`). Rather than hardcode
+names, we scan `smali_classes4/` for the distinctive signatures and
+bail with a clear error if zero or more than one class matches.
 """
 import re
 import sys
@@ -103,7 +103,7 @@ def looks_like_auth_combiner(path: Path) -> bool:
     if "L$0:Ljava/lang/Object;\n" in body and "iput-object" in body \
             and re.search(r"iput-object\s+\S+,\s+\S+,\s+L\S+;->L\$[01]:", body):
         return False
-    # Auth combiner has a small register budget (.locals 2 in 6.0.2);
+    # Auth combiner has a small register budget (.locals 2 in 6.0.4);
     # >4 reliably indicates a state-machine combine.
     locals_m = re.search(r"\.locals\s+(\d+)", body)
     if locals_m and int(locals_m.group(1)) > 4:
@@ -116,9 +116,6 @@ def looks_like_auth_combiner(path: Path) -> bool:
 
 def detect_version(root: Path) -> str:
     """Match the same probe set used by apply_vibration_patches.py."""
-    if (root / "smali_classes3/za8.smali").is_file() \
-            and (root / "smali_classes3/dg5.smali").is_file():
-        return "6.0.2"
     if (root / "smali_classes3/ab8.smali").is_file() \
             and (root / "smali_classes3/bg5.smali").is_file():
         return "6.0.4"
@@ -128,7 +125,7 @@ def detect_version(root: Path) -> str:
 def find_auth_combiner_6x(root: Path) -> Path:
     """Scan smali_classes4 for the single auth-state combiner lambda.
 
-    The class is in smali_classes4 on stock 6.0.2 (it's co-located with
+    The class is in smali_classes4 on stock 6.0.4 (it's co-located with
     the auth state holder `it0` in stock Tencent's R8 output). Walking
     only classes4 keeps the scan fast and avoids matching unrelated
     2-arg combine lambdas elsewhere (image-loading combines, etc., that
@@ -187,14 +184,14 @@ def patch_6x(root: Path) -> None:
 # Privacy-policy popup bypass (6.0.x)
 # ---------------------------------------------------------------------------
 #
-# Login bypass alone is not enough on 6.0.2: the splash screen still pops a
+# Login bypass alone is not enough on 6.0.4: the splash screen still pops a
 # Compose modal titled "Privacy Policy" with body "Welcome to GameHub! …"
 # before reaching the launcher, and tapping Disagree quits the app. The
 # strings live in the features.splash compose-resource pool under keys
 # `features_splash_privacy_dialog_*` (base64-encoded values).
 #
 # Gating mechanism:
-#   * Splash ViewModel (obfuscated class `chk` on stock 6.0.2; extends
+#   * Splash ViewModel (obfuscated class `chk` on stock 6.0.4; extends
 #     androidx.lifecycle.ViewModel via `Lod1;`) holds a SharedPreferences
 #     wrapper at field `i:Lii0;`.
 #   * The wrapper is `Ldyj;` — a thin SharedPreferences proxy whose
@@ -220,7 +217,7 @@ def patch_6x(root: Path) -> None:
 #   * Instead, scan smali_classes4 for any class whose `e(String, Z)Z`
 #     method body matches the exact getBoolean-with-default shape:
 #     `SharedPreferences.contains` then `SharedPreferences.getBoolean`,
-#     no other side effects. Stock 6.0.2 has exactly one such class.
+#     no other side effects. Stock 6.0.4 has exactly one such class.
 
 PRIVACY_KEY = "app_agreement_agreed"
 
@@ -260,7 +257,7 @@ def looks_like_pref_wrapper(path: Path) -> bool:
 
 
 def find_pref_wrapper_6x(root: Path) -> Path:
-    """Stock 6.0.2 has the SharedPreferences wrapper in smali_classes4.
+    """Stock 6.0.4 has the SharedPreferences wrapper in smali_classes4.
     Scan that dir for the single class matching the wrapper signature."""
     candidates = []
     classes4 = root / "smali_classes4"
@@ -360,7 +357,7 @@ def main():
 
     version = detect_version(root)
     print(f"Detected GameHub base version: {version}")
-    if version in ("6.0.2", "6.0.4"):
+    if version == "6.0.4":
         patch_6x(root)
         patch_6x_privacy(root)
     else:

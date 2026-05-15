@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
 """
 Apply PC-accurate vibration patches to a decompiled GameHub apktool tree.
-Supports stock 6.0.2 and 6.0.4 — version is auto-detected from the
+Supports stock 5.3.5 and 6.0.4 — version is auto-detected from the
 smali class layout.
 
-Hooks:
+Hooks (5.3.5 keeps unobfuscated symbols; 6.0.4 has ProGuard renames
+encoded in RENAMES_6X):
 
   1. GamepadServerManager.onRumble(III)V  — entry hook for the dispatcher
-  2. <Physical>.g(II)V                     — per-controller rumble dispatch
-  3. <Physical>.f()V                       — stop hook for keepalive cleanup
+  2. <Physical>.<dispatch>(II)V            — per-controller rumble dispatch
+                                             (h(II)V in 5.3.5; g(II)V in 6.0.4)
+  3. <Physical>.<stop>()V                  — stop hook for keepalive cleanup
+                                             (g()V in 5.3.5; f()V in 6.0.4)
   4. <EnvBuilder>.smali pre-launch hook    — call BhVibrationController to
                                              patch every winebus.so on disk
                                              once per app process (preload-
                                              free SDL rumble keepalive)
+
+NOTE: 5.3.5's GamepadManager.B0 wake-up (multi-controller libvfs lazy-attach
+fix) is not currently restored — it relied on a runtime marker from the
+removed libevshim. Single-controller use on 5.3.5 works without it;
+multi-controller users may have to press a button on each controller
+after connect to trigger SDL_JOYDEVICEADDED. 6.0.x doesn't need this
+because the 6.0 gamepad-subsystem refactor fixed lazy-attach natively.
 
 Per-version ProGuard rename maps are baked into RENAMES_6X below.
 
@@ -55,9 +65,9 @@ def patch(path, old, new, label):
 # Each entry maps version -> a (path, must_exist) probe whose presence is a
 # reliable signature for that base version's apktool layout.
 VERSION_PROBES = {
-    "6.0.2": (
-        "smali_classes3/za8.smali",
-        "smali_classes3/dg5.smali",
+    "5.3.5": (
+        "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali",
+        "smali_classes7/com/winemu/core/controller/EnvironmentController.smali",
     ),
     "6.0.4": (
         "smali_classes3/ab8.smali",
@@ -100,19 +110,11 @@ def detect_version(root: Path) -> str:
 # ---------------------------------------------------------------------------
 
 # Rename maps for the 6.0.x family; same structural patches with the
-# obfuscated names swapped in. Currently only 6.0.2 is supported — earlier
-# 6.0.x builds (6.0.1) had a different rename set and are no longer
-# tracked. To re-enable, add a probe pair to VERSION_PROBES + an entry
-# here with the correct obfuscated class names.
+# obfuscated names swapped in. Only 6.0.4 is currently tracked — earlier
+# 6.0.x builds (6.0.1, 6.0.2) had different rename sets and have been
+# dropped. To re-add a version, append a probe pair to VERSION_PROBES + an
+# entry here with the correct obfuscated class names.
 RENAMES_6X = {
-    "6.0.2": {
-        "physical": "za8",     # GamepadDevice$Physical-equivalent class
-        "physical_k": "lrl",   # type of <Physical>.k field
-        "envbuilder": "dg5",   # LD_PRELOAD env-builder class
-        "join_cls": "ns2",     # CollectionsKt joinTo helper
-        "join_method": "I0",   # joinToString$default
-        "join_lambda": "ow6",  # Function1 lambda parameter type
-    },
     "6.0.4": {
         "physical": "ab8",
         "physical_k": "xrl",
@@ -138,7 +140,7 @@ def apply_6x(root: Path, version: str) -> None:
     print()
 
     # Patch 1: GamepadServerManager.onRumble(III)V — short-circuit hook.
-    # Anchor is the method header + the first if-ltz guard. 6.0.2 uses
+    # Anchor is the method header + the first if-ltz guard. 6.0.4 uses
     # :cond_4 here (earlier 6.0.x builds used :cond_0).
     patch(
         root / "smali_classes3/com/winemu/core/gamepad/GamepadServerManager.smali",
@@ -302,6 +304,139 @@ def apply_6x(root: Path, version: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 5.3.5 patches
+# ---------------------------------------------------------------------------
+
+# Stock 5.3.5 ships unobfuscated symbol names — all four anchors live under
+# smali_classes7/com/winemu/core/{controller,gamepad}/. Method names differ
+# from 6.0.x: dispatch is .h(II)V (not .g) and stop is .g()V (not .f).
+# The deviceId field is .d:I rather than .f:I. The LD_PRELOAD env builder is
+# the named EnvironmentController class (no joinToString helper — uses a
+# List<String> directly), so Patch 4's anchor is the const-string "LD_PRELOAD"
+# right before EnvVars.f(...). Patch 4 in this build only triggers the
+# disk-patch helper; no LD_PRELOAD modification (preload-free architecture).
+
+def apply_535(root: Path) -> None:
+    print("  Layout:           smali_classes7/com/winemu/core/{controller,gamepad}/")
+    print("  Symbols:          stock 5.3.5 ships unobfuscated.")
+    print()
+
+    # Patch 1: GamepadServerManager.onRumble(III)V — entry hook.
+    # 5.3.5's `if-ltz` guard targets :cond_0 (vs :cond_4 in 6.0.x);
+    # otherwise structurally identical to the 6.0.x patch.
+    patch(
+        root / "smali_classes7/com/winemu/core/gamepad/GamepadServerManager.smali",
+        ".method private final onRumble(III)V\n"
+        "    .locals 2\n"
+        "    .annotation build Landroidx/annotation/Keep;\n"
+        "    .end annotation\n"
+        "\n"
+        "    .line 1\n"
+        "    if-ltz p1, :cond_0\n",
+        ".method private final onRumble(III)V\n"
+        "    .locals 2\n"
+        "    .annotation build Landroidx/annotation/Keep;\n"
+        "    .end annotation\n"
+        "\n"
+        "    # BH: PC-accurate rumble dispatcher hook\n"
+        "    invoke-static {p1, p2, p3}, Lcom/xj/winemu/vibration/BhVibrationController;->onRumble(III)Z\n"
+        "\n"
+        "    move-result v0\n"
+        "\n"
+        "    if-eqz v0, :bh_rumble_fallthrough\n"
+        "\n"
+        "    return-void\n"
+        "\n"
+        "    :bh_rumble_fallthrough\n"
+        "\n"
+        "    .line 1\n"
+        "    if-ltz p1, :cond_0\n",
+        "GamepadServerManager.onRumble(III)V: inject BhVibrationController entry hook"
+    )
+
+    # Patch 2: GamepadDevice$Physical.h(II)V — controller dispatch delegate.
+    # deviceId is in field d:I in 5.3.5 (vs f:I in 6.0.x). Same skip-stock-
+    # fallback semantics as the 6.0.x patch.
+    patch(
+        root / "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali",
+        ".method public h(II)V\n"
+        "    .locals 3\n"
+        "\n"
+        "    .line 1\n"
+        "    const v0, 0xffff\n",
+        ".method public h(II)V\n"
+        "    .locals 3\n"
+        "\n"
+        "    # BH: PC-accurate controller dispatch (dual-motor)\n"
+        "    iget v0, p0, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->d:I\n"
+        "\n"
+        "    invoke-static {v0, p1, p2}, Lcom/xj/winemu/vibration/BhVibrationController;->dispatchToController(III)Z\n"
+        "\n"
+        "    move-result v0\n"
+        "\n"
+        "    if-eqz v0, :bh_phys_fallthrough\n"
+        "\n"
+        "    return-void\n"
+        "\n"
+        "    :bh_phys_fallthrough\n"
+        "\n"
+        "    .line 1\n"
+        "    const v0, 0xffff\n",
+        "GamepadDevice$Physical.h(II)V: inject BhVibrationController.dispatchToController"
+    )
+
+    # Patch 3: GamepadDevice$Physical.g()V — stop hook. Stock f(II)V routes
+    # (0,0) -> g() and non-zero -> h(II)V; Patch 2 only catches h, so (0,0)
+    # would bypass the keepalive otherwise. onStop is void; on 5.3.5 it
+    # also issues the Samsung-HAL pre-cancel supersede before falling
+    # through to stock g() (which iterates vibrators and cancels each).
+    patch(
+        root / "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali",
+        ".method public g()V\n"
+        "    .locals 1\n"
+        "\n"
+        "    .line 1\n"
+        "    invoke-virtual {p0}, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->o()Ljava/util/List;\n",
+        ".method public g()V\n"
+        "    .locals 1\n"
+        "\n"
+        "    # BH: dispatch to our handler (supersede pattern), then fall through.\n"
+        "    iget v0, p0, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->d:I\n"
+        "    invoke-static {v0}, Lcom/xj/winemu/vibration/BhVibrationController;->onStop(I)V\n"
+        "\n"
+        "    .line 1\n"
+        "    invoke-virtual {p0}, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->o()Ljava/util/List;\n",
+        "GamepadDevice$Physical.g(): inject BhVibrationController.onStop pre-cancel supersede"
+    )
+
+    # Patch 4: EnvironmentController.b(Wine, String) — pre-launch winebus
+    # disk-patch trigger. 5.3.5's env-builder uses a plain List<String> in
+    # v1 (not the v12 ArrayList of 6.0.x's joinToString flow). We anchor on
+    # the unique `:cond_2 :goto_1 const-string v2, "LD_PRELOAD"` join point
+    # right before EnvVars.f("LD_PRELOAD", v1), and just call into
+    # BhVibrationController.ensureWinebusDurationPatchOnce(ctx) — no
+    # LD_PRELOAD modification. v2 is clobbered by the next const-string on
+    # the line we anchor at, so safe to reuse here.
+    patch(
+        root / "smali_classes7/com/winemu/core/controller/EnvironmentController.smali",
+        "    :cond_2\n"
+        "    :goto_1\n"
+        "    const-string v2, \"LD_PRELOAD\"\n",
+        "    :cond_2\n"
+        "    :goto_1\n"
+        "\n"
+        "    # BH: preload-free SDL rumble keepalive — patch every winebus.so\n"
+        "    # on disk once per app process. AtomicBoolean inside the Java\n"
+        "    # method gates against repeat scans. No LD_PRELOAD changes.\n"
+        "    iget-object v2, p0, Lcom/winemu/core/controller/EnvironmentController;->a:Landroid/content/Context;\n"
+        "    invoke-static {v2}, Lcom/xj/winemu/vibration/BhVibrationController;->ensureWinebusDurationPatchOnce(Landroid/content/Context;)V\n"
+        "\n"
+        "    const-string v2, \"LD_PRELOAD\"\n",
+        "EnvironmentController.b(Wine, String): pre-launch winebus disk-patch trigger"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -317,7 +452,9 @@ def main():
     version = detect_version(root)
     print(f"Detected GameHub base version: {version}")
 
-    if version in RENAMES_6X:
+    if version == "5.3.5":
+        apply_535(root)
+    elif version in RENAMES_6X:
         apply_6x(root, version)
     else:
         # Unreachable: detect_version already validated.

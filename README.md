@@ -8,9 +8,9 @@
 > GOG store integration, Component Manager, RTS touch controls, HUD
 > overlays, root access management, frontend export, etc.), use BannerHub
 > upstream — that's the real project. This fork is a deliberate strip-down
-> of just the vibration mod, supporting stock 6.0.2 and 6.0.4 base APKs.
+> of just the vibration mod, supporting stock 5.3.5 and 6.0.4 base APKs.
 
-A minimal patch on top of stock GameHub (6.0.2 or 6.0.4) that adds
+A minimal patch on top of stock GameHub (5.3.5 or 6.0.4) that adds
 **PC-accurate XInput rumble support** for Wine games. Nothing else is
 changed. This is for the sake of having the working achievements of
 stock GameHub plus fixed vibration.
@@ -69,33 +69,40 @@ The PC Vibration Settings dialog only controls Mode and Intensity.
 ## Build
 
 CI workflow: `.github/workflows/build.yml` — triggers on `workflow_dispatch`
-(pick base version 6.0.2 / 6.0.4) or push of a `v*-6.0.2*` / `v*-6.0.4*`
+(pick base version 5.3.5 / 6.0.4) or push of a `v*-5.3.5*` / `v*-6.0.4*`
 tag.
 
 One-time setup per base version: upload the original GameHub APK as an
 asset on a release tagged `base-apk-<version>` in this repo (e.g.
-`base-apk-6.0.4` for `GameHub_6.0.4_fadf3b5c43f0a3900027758d372b3d54.apk`).
+`base-apk-6.0.4` for `GameHub_6.0.4_fadf3b5c43f0a3900027758d372b3d54.apk`,
+`base-apk-5.3.5` for `GameHub_5.3.5_e5e1b35b774c482a66333afc51eb14b2.apk`).
 The workflow `gh release download`s the matching base for the version it
 was triggered against.
 
 `scripts/apply_vibration_patches.py` auto-detects the base version from
 the smali layout of the decompiled tree:
 
-- **6.0.2** uses ProGuard names `za8` (Physical), `dg5` (env builder),
-  `ns2.I0` (joinToString helper).
-- **6.0.4** renames those to `ab8`, `bg5`, `ps2.I0` respectively.
+- **5.3.5** ships unobfuscated symbols under
+  `smali_classes7/com/winemu/core/{gamepad,controller}/`.
+- **6.0.4** uses ProGuard names `ab8` (Physical), `bg5` (env builder),
+  `ps2.I0` (joinToString helper).
 
 Full rename map and per-version anchor set are at the top of the script.
+5.3.5's multi-controller wake-up hook (`GamepadManager.B0`) is not
+currently restored — single-controller use works without it, but on
+multi-controller setups the 2nd/3rd/4th controller needs one button
+press after connect to register with libvfs. 6.0.x does not need this.
 
 The pipeline:
 
 1. `apktool d` the base APK
 2. Strip `android:usesPermissionFlags` and
    `android:enableOnBackInvokedCallback` from the manifest (apktool 2.9.3's
-   bundled aapt2 doesn't know them; cosmetic, harmless)
+   bundled aapt2 doesn't know them; cosmetic, harmless — no-op on 5.3.5
+   where these attributes don't exist)
 3. `python3 scripts/apply_vibration_patches.py` — four smali hooks
-4. (optional) `python3 scripts/apply_login_bypass.py` — patch the
-   auth-state combiner + privacy-popup gate
+4. (optional, **6.0.4 only**) `python3 scripts/apply_login_bypass.py` —
+   patch the auth-state combiner + privacy-popup gate
 5. `apktool b`
 6. `javac + d8` of the two `extension/Bh*.java` files → next free
    `classesN.dex` slot (classes7), inject into the APK
@@ -113,7 +120,7 @@ extension/
 
 scripts/
   apply_vibration_patches.py       smali hooks against a decompiled
-                                   apktool tree (6.0.2 or 6.0.4;
+                                   apktool tree (5.3.5 or 6.0.4;
                                    version auto-detected from layout).
   patch_winebus_rumble_duration.py offline preload-free patch for
                                    extracted aarch64-unix/winebus.so.

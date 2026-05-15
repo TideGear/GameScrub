@@ -5,7 +5,7 @@ name: Build APK
 # rumble keepalive (winebus.so duration patched on disk) on top of stock
 # GameHub. Otherwise unchanged from upstream Tencent build.
 #
-# Supports stock 6.0.2 and 6.0.4 (apply_vibration_patches.py auto-detects
+# Supports stock 5.3.5 and 6.0.4 (apply_vibration_patches.py auto-detects
 # the version from the smali layout of the decompiled tree).
 #
 # Setup once per base version: upload the original GameHub APK as an
@@ -15,7 +15,7 @@ name: Build APK
 on:
   push:
     tags:
-      - 'v*-6.0.2*'
+      - 'v*-5.3.5*'
       - 'v*-6.0.4*'
   workflow_dispatch:
     inputs:
@@ -26,9 +26,9 @@ on:
         type: choice
         options:
           - '6.0.4'
-          - '6.0.2'
+          - '5.3.5'
       bypass_login:
-        description: 'Bypass the GameHub login screen and the splash privacy popup.'
+        description: 'Bypass the GameHub login screen and the splash privacy popup. 6.0.4 only — no-op on 5.3.5.'
         required: false
         default: false
         type: boolean
@@ -53,7 +53,7 @@ jobs:
             VER="${{ inputs.base_version }}"
           else
             REF="${GITHUB_REF#refs/tags/}"
-            VER="$(echo "$REF" | sed -nE 's/.*-(6\.0\.2|6\.0\.4).*/\1/p')"
+            VER="$(echo "$REF" | sed -nE 's/.*-(5\.3\.5|6\.0\.4).*/\1/p')"
           fi
           if [ -z "$VER" ]; then
             echo "ERROR: could not resolve base version from event=${{ github.event_name }} ref=${GITHUB_REF}" >&2
@@ -106,18 +106,20 @@ jobs:
 
       - name: Apply BhVibration smali patches
         run: |
-          # apply_vibration_patches.py auto-detects 6.0.2 / 6.0.4 from
+          # apply_vibration_patches.py auto-detects 5.3.5 / 6.0.4 from
           # the smali layout of the decompiled tree. Per-version anchor
           # set + rename maps live at the top of that script.
           python3 scripts/apply_vibration_patches.py apktool_out
 
-      - name: Apply login bypass (optional)
-        if: inputs.bypass_login == true
+      - name: Apply login bypass (optional, 6.0.4 only)
+        if: inputs.bypass_login == true && steps.base.outputs.version == '6.0.4'
         run: |
           # Rewrites the isLoggedIn-combiner lambda's invokeSuspend body
           # to return Boolean.TRUE (skips login screen) and shorts the
           # SharedPreferences getter for "app_agreement_agreed" to
           # always return true (skips the splash privacy popup).
+          # 5.3.5 has a different auth flow and no login bypass is wired
+          # up for it in this build.
           python3 scripts/apply_login_bypass.py apktool_out
 
       - name: Rebuild and sign
