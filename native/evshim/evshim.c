@@ -169,8 +169,21 @@ static void start_keepalive(void)
     }
 }
 
-/* ─── interposed symbols ──────────────────────────────────────────────── */
+/* ─── wrapper functions ──────────────────────────────────────────────────
+ *
+ * These are NOT exported. CMake compiles with -fvisibility=hidden and we
+ * annotate each function below to be doubly sure. The wrappers are reached
+ * only via compile-time address (&SDL_JoystickRumble) written into
+ * winebus.so's pSDL_* table by the patcher — never via dlsym/RTLD_NEXT or
+ * any other symbol resolution path. Keeping these out of the dynamic
+ * symbol table is what fixes Shotgun King's silent-exit-at-launch (the
+ * GameMaker engine bundles its own SDL2.dll, and the host-side LD_PRELOAD
+ * chain having a visible SDL_JoystickRumble was apparently enough to
+ * confuse some part of the Wine/Box64/PE-resolver path for that game
+ * specifically — other games (Dead Cells, controller testers) don't
+ * bundle SDL2 the same way and weren't affected). */
 
+__attribute__((visibility("hidden")))
 int SDL_JoystickRumble(SDL_Joystick *js, uint16_t low_freq, uint16_t high_freq,
                        uint32_t duration_ms)
 {
@@ -217,6 +230,7 @@ int SDL_JoystickRumble(SDL_Joystick *js, uint16_t low_freq, uint16_t high_freq,
     return real_SDL_JoystickRumble(js, low_freq, high_freq, duration_ms);
 }
 
+__attribute__((visibility("hidden")))
 void SDL_JoystickClose(SDL_Joystick *js)
 {
     resolve_real();
