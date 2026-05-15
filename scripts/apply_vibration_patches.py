@@ -15,14 +15,27 @@ encoded in RENAMES_6X):
   4. <EnvBuilder>.smali pre-launch hook    — call BhVibrationController to
                                              patch every winebus.so on disk
                                              once per app process (preload-
-                                             free SDL rumble keepalive)
+                                             free SDL rumble keepalive).
+                                             5.3.5 also prepends
+                                             libsdlpreload.so to LD_PRELOAD
+                                             (see note below).
 
-NOTE: 5.3.5's GamepadManager.B0 wake-up (multi-controller libvfs lazy-attach
-fix) is not currently restored — it relied on a runtime marker from the
-removed libevshim. Single-controller use on 5.3.5 works without it;
-multi-controller users may have to press a button on each controller
-after connect to trigger SDL_JOYDEVICEADDED. 6.0.x doesn't need this
-because the 6.0 gamepad-subsystem refactor fixed lazy-attach natively.
+NOTE 1: 5.3.5's Patch 4 prepends libsdlpreload.so to LD_PRELOAD in addition
+to triggering the disk patch. Stock 5.3.5 leaves libSDL2-2.0.so reachable
+only via libvfs.so's RTLD_LOCAL dlopen, so SteamAgent2's Wine PE can't
+resolve SDL symbols cleanly and reports init_failed=1004 to GameHub's
+SteamAgentServer (blocking the Steam-button launch path). libsdlpreload.so
+is a tiny constructor-only library whose only job is dlopen("libSDL2-2.0.so",
+RTLD_NOW|RTLD_GLOBAL) in each Wine subprocess that needs SDL. 6.0.x fixed
+the namespace issue natively, so the 6.0.4 patch path stays strictly
+preload-free (no .so added to LD_PRELOAD).
+
+NOTE 2: 5.3.5's GamepadManager.B0 wake-up (multi-controller libvfs lazy-
+attach fix) is not currently restored — it relied on a runtime marker from
+the removed libevshim. Single-controller use on 5.3.5 works without it;
+multi-controller users may have to press a button on each controller after
+connect to trigger SDL_JOYDEVICEADDED. 6.0.x doesn't need this because the
+6.0 gamepad-subsystem refactor fixed lazy-attach natively.
 
 Per-version ProGuard rename maps are baked into RENAMES_6X below.
 
@@ -409,14 +422,33 @@ def apply_535(root: Path) -> None:
         "GamepadDevice$Physical.g(): inject BhVibrationController.onStop pre-cancel supersede"
     )
 
-    # Patch 4: EnvironmentController.b(Wine, String) — pre-launch winebus
-    # disk-patch trigger. 5.3.5's env-builder uses a plain List<String> in
-    # v1 (not the v12 ArrayList of 6.0.x's joinToString flow). We anchor on
-    # the unique `:cond_2 :goto_1 const-string v2, "LD_PRELOAD"` join point
-    # right before EnvVars.f("LD_PRELOAD", v1), and just call into
-    # BhVibrationController.ensureWinebusDurationPatchOnce(ctx) — no
-    # LD_PRELOAD modification. v2 is clobbered by the next const-string on
-    # the line we anchor at, so safe to reuse here.
+    # Patch 4: EnvironmentController.b(Wine, String) — prepend
+    # libsdlpreload.so to LD_PRELOAD and trigger the pre-launch winebus
+    # disk patch.
+    #
+    # 5.3.5's env-builder uses a plain List<String> in v1 (not the v12
+    # ArrayList of 6.0.x's joinToString flow). We anchor on the unique
+    # `:cond_2 :goto_1 const-string v2, "LD_PRELOAD"` join point right
+    # before EnvVars.f("LD_PRELOAD", v1).
+    #
+    # Why libsdlpreload.so on 5.3.5: stock 5.3.5 loads libSDL2-2.0.so in
+    # libvfs.so's private (RTLD_LOCAL) namespace, so SteamAgent2's Wine PE
+    # can't resolve SDL symbols cleanly and reports init_failed=1004 to
+    # GameHub's SteamAgentServer, blocking the Steam-button launch path.
+    # BannerHub's libevshim.so accidentally fixed this as a side effect of
+    # its preload_sdl_global() call; once we went preload-free that side
+    # effect disappeared. libsdlpreload.so exists solely to dlopen libSDL2
+    # with RTLD_GLOBAL in its constructor — no SDL interpose, no keepalive
+    # thread. 6.0.4 doesn't need this (Tencent fixed the namespace issue
+    # there natively) and the 6.0.4 patch path stays strictly preload-free.
+    #
+    # Why also call ensureWinebusDurationPatchOnce here: sustained rumble
+    # past SDL's ~1 s expiry needs the on-disk winebus.so duration patch
+    # regardless of architecture. AtomicBoolean inside the Java method
+    # gates against repeat scans.
+    #
+    # v2/v3 are clobbered by the const-string and StringBuilder usage; safe
+    # to reuse for the path build + File.exists check.
     patch(
         root / "smali_classes7/com/winemu/core/controller/EnvironmentController.smali",
         "    :cond_2\n"
@@ -425,14 +457,36 @@ def apply_535(root: Path) -> None:
         "    :cond_2\n"
         "    :goto_1\n"
         "\n"
+        "    # BH: prepend libsdlpreload.so to LD_PRELOAD list (Wine SDL2\n"
+        "    # RTLD_GLOBAL fixup — 5.3.5 SteamAgent2 init dependency).\n"
+        "    iget-object v2, p0, Lcom/winemu/core/controller/EnvironmentController;->a:Landroid/content/Context;\n"
+        "    invoke-virtual {v2}, Landroid/content/Context;->getApplicationInfo()Landroid/content/pm/ApplicationInfo;\n"
+        "    move-result-object v2\n"
+        "    iget-object v2, v2, Landroid/content/pm/ApplicationInfo;->nativeLibraryDir:Ljava/lang/String;\n"
+        "    new-instance v3, Ljava/lang/StringBuilder;\n"
+        "    invoke-direct {v3}, Ljava/lang/StringBuilder;-><init>()V\n"
+        "    invoke-virtual {v3, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;\n"
+        "    const-string v2, \"/libsdlpreload.so\"\n"
+        "    invoke-virtual {v3, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;\n"
+        "    invoke-virtual {v3}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;\n"
+        "    move-result-object v2\n"
+        "    new-instance v3, Ljava/io/File;\n"
+        "    invoke-direct {v3, v2}, Ljava/io/File;-><init>(Ljava/lang/String;)V\n"
+        "    invoke-virtual {v3}, Ljava/io/File;->exists()Z\n"
+        "    move-result v3\n"
+        "    if-eqz v3, :bh_skip_sdlpreload\n"
+        "    const/4 v3, 0x0\n"
+        "    invoke-interface {v1, v3, v2}, Ljava/util/List;->add(ILjava/lang/Object;)V\n"
+        "    :bh_skip_sdlpreload\n"
+        "\n"
         "    # BH: preload-free SDL rumble keepalive — patch every winebus.so\n"
         "    # on disk once per app process. AtomicBoolean inside the Java\n"
-        "    # method gates against repeat scans. No LD_PRELOAD changes.\n"
+        "    # method gates against repeat scans.\n"
         "    iget-object v2, p0, Lcom/winemu/core/controller/EnvironmentController;->a:Landroid/content/Context;\n"
         "    invoke-static {v2}, Lcom/xj/winemu/vibration/BhVibrationController;->ensureWinebusDurationPatchOnce(Landroid/content/Context;)V\n"
         "\n"
         "    const-string v2, \"LD_PRELOAD\"\n",
-        "EnvironmentController.b(Wine, String): pre-launch winebus disk-patch trigger"
+        "EnvironmentController.b(Wine, String): prepend libsdlpreload.so + disk-patch trigger"
     )
 
 

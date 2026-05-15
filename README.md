@@ -64,6 +64,33 @@ on a future proton build, the patcher writes the file to
 `<externalFilesDir>/winebus_dump_x86_64.so` so the new codegen can be
 inspected with `adb pull` and the pattern refined.
 
+### One 5.3.5-only exception: `libsdlpreload.so`
+
+5.3.5's stock Wine setup leaves `libSDL2-2.0.so` reachable only via
+`libvfs.so`'s private (`RTLD_LOCAL`) namespace. SteamAgent2's Wine PE then
+can't resolve SDL symbols cleanly and reports `init_failed=1004` to
+GameHub's `SteamAgentServer`, blocking the Steam-button launch path.
+6.0.x fixed that natively; 5.3.5 didn't, and BannerHub's old build only
+worked because its `libevshim.so` accidentally papered over it as a side
+effect of `dlopen("libSDL2-2.0.so", RTLD_NOW|RTLD_GLOBAL)` in its
+constructor.
+
+5.3.5 builds ship a tiny constructor-only library
+[native/sdlpreload/sdlpreload.c](native/sdlpreload/sdlpreload.c) whose
+*only* job is that same `RTLD_GLOBAL` dlopen, plus the BannerHub skip list
+(wineserver, services.exe, plugplay.exe, svchost.exe, explorer.exe,
+rpcss.exe, tabtip.exe, jwm) to keep libSDL2 out of processes that don't
+need it. The 5.3.5 envbuilder smali patch prepends it to `LD_PRELOAD` and
+then triggers the disk patcher. No `SDL_JoystickRumble` interpose, no
+keepalive thread, no winebus GOT patcher — those features all live in the
+disk patch + smali dispatch hooks.
+
+**6.0.4 does not ship `libsdlpreload.so` and adds nothing to `LD_PRELOAD`.**
+That's deliberate: the `SK silently exits when anything maps into its Wine
+address space` regression only reproduces on 6.0.x. The 6.0.4 build stays
+strictly preload-free; the 5.3.5 build trades a single ~2 KB extra mapping
+for working Steam launches.
+
 The PC Vibration Settings dialog only controls Mode and Intensity.
 
 ## Build
@@ -118,12 +145,19 @@ extension/
                                    in-process winebus.so disk patcher).
   BhVibrationSettingsActivity.java Mode/Intensity dialog UI.
 
+native/sdlpreload/
+  sdlpreload.c, CMakeLists.txt     5.3.5-only tiny LD_PRELOAD library;
+                                   constructor dlopens libSDL2-2.0.so with
+                                   RTLD_NOW|RTLD_GLOBAL so SteamAgent2's
+                                   Wine PE can resolve SDL symbols. Built
+                                   only when CI's base_version=5.3.5.
+
 scripts/
   apply_vibration_patches.py       smali hooks against a decompiled
                                    apktool tree (5.3.5 or 6.0.4;
                                    version auto-detected from layout).
   patch_winebus_rumble_duration.py offline preload-free patch for
-                                   extracted aarch64-unix/winebus.so.
+                                   extracted winebus.so (aarch64 + x86_64).
 
 .github/workflows/build.yml        CI build pipeline.
 ```

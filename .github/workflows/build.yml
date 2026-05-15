@@ -122,6 +122,41 @@ jobs:
           # up for it in this build.
           python3 scripts/apply_login_bypass.py apktool_out
 
+      - name: Build libsdlpreload.so (5.3.5 only — SteamAgent2 init fix)
+        if: steps.base.outputs.version == '5.3.5'
+        run: |
+          # Tiny LD_PRELOAD library whose constructor dlopens libSDL2-2.0.so
+          # with RTLD_NOW|RTLD_GLOBAL so SteamAgent2's Wine PE can resolve
+          # SDL symbols on stock 5.3.5 (which otherwise leaves libSDL2 in
+          # libvfs.so's RTLD_LOCAL namespace -> init_failed=1004 -> Steam
+          # button can't launch games). 6.0.x doesn't need this and the
+          # 6.0.4 build skips this step.
+          set -e
+          NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          if [ -z "$NDK_HOME" ] || [ ! -d "$NDK_HOME" ]; then
+            NDK_HOME=$(ls -d "${ANDROID_SDK_ROOT}"/ndk/* 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -z "$NDK_HOME" ] || [ ! -d "$NDK_HOME" ]; then
+            NDK_HOME="${ANDROID_SDK_ROOT}/ndk-bundle"
+          fi
+          echo "Using NDK: $NDK_HOME"
+          if ! command -v ninja >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ninja-build
+          fi
+          cmake -S native/sdlpreload -B build/sdlpreload \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -G Ninja
+          ninja -C build/sdlpreload
+          mkdir -p apktool_out/lib/arm64-v8a
+          cp build/sdlpreload/libsdlpreload.so apktool_out/lib/arm64-v8a/libsdlpreload.so
+          chmod 0755 apktool_out/lib/arm64-v8a/libsdlpreload.so
+          file apktool_out/lib/arm64-v8a/libsdlpreload.so
+          ls -la apktool_out/lib/arm64-v8a/libsdlpreload.so
+
       - name: Rebuild and sign
         run: |
           set -e
