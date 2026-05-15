@@ -539,58 +539,28 @@ static void *one_shot_patcher_thread(void *arg)
     return NULL;
 }
 
-/* Heuristic: does this Wine subprocess plausibly need SDL2 loaded into
- * the global namespace? We use the /proc/self/cmdline contents to skip
- * obvious system services (wineserver, services.exe, plugplay.exe,
- * svchost.exe, explorer.exe, rpcss.exe, tabtip.exe, jwm) that never
- * touch HID/gamepad input. winedevice.exe DOES need SDL2 (it loads
- * winebus.so which dlopens SDL2), and so do the actual game .exe's,
- * which we accept as the default-true case.
+/* Allowlist: only preload host libSDL2-2.0.so in Wine subprocesses that
+ * actually need it. The only one that does is winedevice.exe — that's
+ * where winebus.so gets loaded, winebus dlopens libSDL2 to dlsym its
+ * pSDL_* function pointers, and that's where our one-shot patcher
+ * overwrites those pointers to route through our keepalive wrapper.
  *
- * Skipping the preload in ~7 of ~10 Wine subprocesses avoids loading
- * libSDL2 + transitives (libpulse, libasound, libdbus, etc.) into
- * processes that will never use them. */
+ * Why an allowlist instead of the previous denylist: every game .exe
+ * was opt-in to the SDL preload by default, which meant our LD_PRELOAD
+ * dropped libSDL2-2.0.so + transitives into the host address space of
+ * the game's own process (Box64 running e.g. shotgun_king.exe). For
+ * games that bundle their own SDL2.dll inside Wine or that Box64
+ * wraps SDL2 calls for specifically, this could collide with the
+ * static-init or symbol resolution of the game's SDL stack and cause
+ * the game to silently exit at startup (no tombstone, just a clean
+ * exit) — Wine then tears down the whole subprocess tree. Restricting
+ * the preload to winedevice.exe avoids touching any game process
+ * while still landing the patcher exactly where it's needed. */
 static int proc_needs_sdl(void)
 {
     char cmd[256];
     read_self_cmdline(cmd, sizeof(cmd));
-    /* Process-name suffixes we know don't use SDL — match case-insensitively
-     * since Windows-side paths can be either.
-     *
-     * Steam-side daemons added after a reported hang: steamservice.exe
-     * (cloud-sync helper) and steamwebhelper.exe (Steam overlay browser
-     * process) are PE images Steam spawns that don't use SDL. Without
-     * this, our preload_sdl_global() force-loads libSDL2-2.0.so into
-     * them, which either trips SDL's static init in a context with no
-     * audio/video/input device available (abort) or collides with
-     * Steam's bundled SDL. steamservice.exe dying leaves Steam waiting
-     * forever for cloud sync, hanging every game launch at "Initializing".
-     *
-     * conhost.exe / cmd.exe / rundll32.exe are common Wine helper PE
-     * shells; added defensively. */
-    static const char * const skip_markers[] = {
-        "wineserver",
-        "services.exe",
-        "plugplay.exe",
-        "svchost.exe",
-        "explorer.exe",
-        "rpcss.exe",
-        "tabtip.exe",
-        "steamservice.exe",
-        "steamwebhelper.exe",
-        "conhost.exe",
-        "cmd.exe",
-        "rundll32.exe",
-        "/jwm ",
-        "/jwm",
-        NULL,
-    };
-    for (int i = 0; skip_markers[i]; i++) {
-        if (strstr(cmd, skip_markers[i])) {
-            return 0;
-        }
-    }
-    return 1;
+    return strstr(cmd, "winedevice.exe") != NULL;
 }
 
 /* Force libSDL2-2.0.so into the global linker namespace before libvfs.so
