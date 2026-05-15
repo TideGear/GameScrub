@@ -650,7 +650,23 @@ static void evshim_atfork_child(void)
     }
 }
 
-__attribute__((constructor))
+/* DIAGNOSTIC BUILD: constructor attribute removed so libevshim's
+ * .init_array is empty. The .so still gets mmap'd into every Wine
+ * subprocess via LD_PRELOAD, but evshim_ctor() never runs — no LOG
+ * calls, no /proc/self/cmdline read, no socket open via __android_log_print,
+ * no preload_sdl_global, no patcher thread.
+ *
+ * If Shotgun King launches under this build, the failure is one of the
+ * ctor's side effects (almost certainly the liblog socket open) and we
+ * can defer ctor work behind a per-process dlsym gate. If Shotgun King
+ * still fails, the failure is the mere mmap'd presence of libevshim in
+ * the Wine subprocess address space — Wine's preloader, Box64's
+ * library-wrapping, or similar — and the only viable path is opt-in.
+ *
+ * Lose: SDL keepalive (patcher never runs → SDL's 1 s rumble expiry
+ * fires → sustained rumble cuts at 1 s). Smali patches 1-3 still work
+ * (dual-motor dispatch + instant release).
+ */
 static void evshim_ctor(void)
 {
     LOG("loaded pid=%d", (int)getpid());
