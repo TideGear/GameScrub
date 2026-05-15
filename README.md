@@ -55,11 +55,14 @@ Wine launcher. The Java side scans the files tree for every `winebus.so`
 and rewrites the duration loads in place; an `AtomicBoolean` gates against
 repeat scans.
 
-Currently the on-disk patch pattern matches the aarch64-unix `winebus.so`
-only. x86_64 containers will load with stock SDL behaviour (~1 s
-rumble auto-expiry) until an x86_64 instruction pattern is added — but
-the launch itself is no longer affected, so games that previously failed
-because of preload mappings now run.
+Both aarch64-unix and x86_64-unix `winebus.so` variants are patched. The
+aarch64 path rewrites `ldur w3,[x29,#-0x14]; blr x8` to `mov w3,#-1; blr x8`.
+The x86_64 path matches an 11-byte clang/NDK-r26 codegen window (`mov ecx,
+[rbp+disp8]; movzwl si,esi; movzwl dx,edx; call *%rax`) and replaces the
+3-byte duration load with `or ecx, -1`. If the x86_64 pattern ever misses
+on a future proton build, the patcher writes the file to
+`<externalFilesDir>/winebus_dump_x86_64.so` so the new codegen can be
+inspected with `adb pull` and the pattern refined.
 
 The PC Vibration Settings dialog only controls Mode and Intensity.
 
