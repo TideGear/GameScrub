@@ -1,7 +1,7 @@
 name: Build APK
 
 # GameHub with PC-accurate XInput rumble — the vibration mod only,
-# nothing else. Adds dual-motor low/high dispatch + libevshim sustained
+# nothing else. Adds dual-motor low/high dispatch + winedevice-only SDL
 # rumble keepalive on top of stock GameHub. Otherwise unchanged from
 # upstream Tencent build.
 #
@@ -120,7 +120,7 @@ jobs:
           # always return true (skips the splash privacy popup).
           python3 scripts/apply_login_bypass.py apktool_out
 
-      - name: Build libevshim.so (guest-side SDL keepalive)
+      - name: Build native SDL keepalive libraries
         run: |
           set -e
           NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
@@ -144,8 +144,10 @@ jobs:
           ninja -C build/evshim
           mkdir -p apktool_out/lib/arm64-v8a
           cp build/evshim/libevshim.so apktool_out/lib/arm64-v8a/libevshim.so
-          chmod 0755 apktool_out/lib/arm64-v8a/libevshim.so
+          cp build/evshim/libevgate.so apktool_out/lib/arm64-v8a/libevgate.so
+          chmod 0755 apktool_out/lib/arm64-v8a/libevshim.so apktool_out/lib/arm64-v8a/libevgate.so
           file apktool_out/lib/arm64-v8a/libevshim.so
+          file apktool_out/lib/arm64-v8a/libevgate.so
 
       - name: Rebuild and sign
         run: |

@@ -175,15 +175,14 @@ public class BhVibrationSettingsActivity extends Activity {
 
         root.addView(controlsRow);
 
-        // Per-game "Engine keepalive" toggle. Default checked (libevshim
-        // preloaded so SDL's 1 s rumble auto-expiry is suppressed and
-        // sustained rumble holds past 1 s). Some games (Shotgun King
-        // confirmed) silently fail to launch when libevshim is mapped
-        // into their Wine subprocess address space — uncheck here for
-        // those games and the smali envbuilder skips the LD_PRELOAD
-        // entry. Per-game; only meaningful when there's a gameId scope.
+        // Per-game "Engine keepalive" toggle. Default checked: the
+        // envbuilder preloads libevgate, which only loads libevshim inside
+        // winedevice.exe so SDL's 1 s rumble auto-expiry is suppressed
+        // without mapping libevshim into the game process. Uncheck if even
+        // the gate preload breaks a specific game. Per-game; only
+        // meaningful when there's a gameId scope.
         final CheckBox evshimToggle = new CheckBox(this);
-        evshimToggle.setText("Engine keepalive (uncheck if this game fails to launch)");
+        evshimToggle.setText("Engine keepalive (winedevice-only)");
         evshimToggle.setTextColor(Color.WHITE);
         evshimToggle.setTextSize(12);
         evshimToggle.setChecked(ctl.isEvshimEnabledForCurrentContainer());

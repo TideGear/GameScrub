@@ -9,8 +9,9 @@ Hooks:
   1. GamepadServerManager.onRumble(III)V  — entry hook for the dispatcher
   2. <Physical>.g(II)V                     — per-controller rumble dispatch
   3. <Physical>.f()V                       — stop hook for keepalive cleanup
-  4. <EnvBuilder>.smali LD_PRELOAD path    — prepend libevshim.so for SDL
-                                             1 s auto-expiry keepalive
+  4. <EnvBuilder>.smali LD_PRELOAD path    — prepend libevgate.so, which
+                                             loads libevshim.so only inside
+                                             winedevice.exe
 
 Per-version ProGuard rename maps are baked into RENAMES_6X below.
 
@@ -225,7 +226,7 @@ def apply_6x(root: Path, version: str) -> None:
         f"{phys}.f(): inject BhVibrationController.onStop keepalive-map cleanup"
     )
 
-    # Patch 4: <EnvBuilder>.smali — prepend libevshim.so to LD_PRELOAD list.
+    # Patch 4: <EnvBuilder>.smali — prepend libevgate.so to LD_PRELOAD list.
     # In the LD_PRELOAD building method (a(L<...>;Ljava/lang/String;Z)V,
     # .locals 35), v12 is the ArrayList<String> being built and v0 is
     # `this`. Inject just before the joinToString(":") call. Use registers
@@ -261,15 +262,13 @@ def apply_6x(root: Path, version: str) -> None:
         "\n"
         "    .line 465\n"
         f"    invoke-static/range {{v12 .. v17}}, {join_signature}\n",
-        "    # BH: prepend libevshim.so to LD_PRELOAD list (guest-side SDL keepalive)\n"
+        "    # BH: prepend libevgate.so to LD_PRELOAD list (winedevice-only SDL keepalive)\n"
         f"    # v0 = this ({env}), v12 = ArrayList<String>. v13..v15 are clobbered\n"
         "    # by the join setup right after this block, so safe to reuse.\n"
         "    #\n"
-        "    # Gate the prepend on a per-game pref via BhVibrationController so\n"
-        "    # games that break with libevshim mapped into their address space\n"
-        "    # (e.g. Shotgun King — verified pure-mmap presence regression, not\n"
-        "    # symbol or ctor side effects) can opt out individually. Default\n"
-        "    # is on (every other game keeps sustained-rumble keepalive).\n"
+        "    # Gate the prepend on a per-game pref via BhVibrationController.\n"
+        "    # libevgate itself is mapped process-wide, but it dlopen()s\n"
+        "    # libevshim.so only when /proc/self/cmdline is winedevice.exe.\n"
         f"    iget-object v13, v0, L{env};->a:Landroid/content/Context;\n"
         "    invoke-static {v13}, Lcom/xj/winemu/vibration/BhVibrationController;->shouldPreloadEvshim(Landroid/content/Context;)Z\n"
         "    move-result v14\n"
@@ -281,7 +280,7 @@ def apply_6x(root: Path, version: str) -> None:
         "    new-instance v14, Ljava/lang/StringBuilder;\n"
         "    invoke-direct {v14}, Ljava/lang/StringBuilder;-><init>()V\n"
         "    invoke-virtual {v14, v13}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;\n"
-        "    const-string v13, \"/libevshim.so\"\n"
+        "    const-string v13, \"/libevgate.so\"\n"
         "    invoke-virtual {v14, v13}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;\n"
         "    invoke-virtual {v14}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;\n"
         "    move-result-object v13\n"
@@ -313,7 +312,7 @@ def apply_6x(root: Path, version: str) -> None:
         "\n"
         "    .line 465\n"
         f"    invoke-static/range {{v12 .. v17}}, {join_signature}\n",
-        f"{env}.a(...): prepend libevshim.so to LD_PRELOAD list"
+        f"{env}.a(...): prepend libevgate.so to LD_PRELOAD list"
     )
 
 

@@ -24,8 +24,9 @@ What you get over stock GameHub:
   / light distinction the way the game intended.
 - **Sustained rumble holds past 1 s.** SDL2's internal 1 s
   `rumble_expiration` auto-stops sustained rumble on stock; an LD_PRELOAD
-  shim (`libevshim.so`) re-issues `SDL_JoystickRumble` every 500 ms with a
-  2 s duration so the timer never fires.
+  gate (`libevgate.so`) loads `libevshim.so` only inside `winedevice.exe`,
+  where the shim re-issues `SDL_JoystickRumble` every 500 ms with a 2 s
+  duration so the timer never fires.
 - **Experimental preload-free Wine patch.** For games that fail when
   `libevshim.so` is mapped, the APK's launch-time Java hook patches the
   app-owned `aarch64-unix/winebus.so` directly. The offline helper
@@ -48,24 +49,21 @@ confirmed case is **Shotgun King: The Final Checkmate** (GameMaker Studio
 and no tombstone.
 
 The PC Vibration Settings dialog (long-press a game → settings → PC
-Vibration) has an **"Engine keepalive"** checkbox that defaults checked.
+Vibration) has an **"Engine keepalive (winedevice-only)"** checkbox that defaults checked.
 Uncheck it for any game that fails to launch — the smali envbuilder
 patch ([scripts/apply_vibration_patches.py](scripts/apply_vibration_patches.py))
 calls
 [BhVibrationController.shouldPreloadEvshim()](extension/BhVibrationController.java)
-before adding libevshim to LD_PRELOAD; if the per-game pref
+before adding `libevgate.so` to LD_PRELOAD; if the per-game pref
 (`bh_evshim_enabled` under `pc_g_setting<gameId>`) is false, the prepend
-is skipped, libevshim never enters that launch's LD_PRELOAD, and the
-dynamic linker never maps it into the Wine subprocess. Tradeoff for the
-disabled game: SDL's 1 s rumble auto-expiry kicks back in, so sustained
-rumble cuts at one second. Dual-motor dispatch and instant release still
-work (smali patches 1–3 are independent of libevshim).
+is skipped. With the checkbox enabled, `libevgate.so` maps process-wide but
+`libevshim.so` is only loaded in `winedevice.exe`; this is the Shotgun King
+test path. With the checkbox disabled, neither gate nor shim is preloaded.
+Dual-motor dispatch and instant release still work; smali patches 1-3 are
+independent of the native keepalive.
 
-The APK attempts the Wine-side `winebus.so` duration patch once per app
-process before deciding whether to add `libevshim.so` to LD_PRELOAD. For
-Shotgun King, disable **Engine keepalive**. That avoids the `libevshim.so`
-mapping that breaks launch, while the Wine-side duration patch keeps SDL
-from auto-stopping rumble at one second.
+The APK also attempts the Wine-side `winebus.so` duration patch once per app
+process before deciding whether to add `libevgate.so` to LD_PRELOAD.
 
 The toggle's setting lives under the same `pc_g_setting<gameId>` file as
 Mode/Intensity, so it round-trips through Export/Import the same way.
@@ -100,7 +98,8 @@ The pipeline:
 3. `python3 scripts/apply_vibration_patches.py` — four smali hooks
 4. (optional) `python3 scripts/apply_login_bypass.py` — patch the
    auth-state combiner + privacy-popup gate
-5. `cmake/ninja` build of `native/evshim/libevshim.so` for arm64-v8a
+5. `cmake/ninja` build of `native/evshim/libevshim.so` and
+   `native/evshim/libevgate.so` for arm64-v8a
 6. `apktool b`
 7. `javac + d8` of the two `extension/Bh*.java` files → next free
    `classesN.dex` slot (classes7), inject into the APK
@@ -116,7 +115,9 @@ extension/
   BhVibrationSettingsActivity.java Mode/Intensity dialog UI
 
 native/evshim/
-  evshim.c, CMakeLists.txt         guest-side LD_PRELOAD shim. Patches
+  evgate.c                         tiny LD_PRELOAD gate; loads libevshim.so
+                                   only for winedevice.exe.
+  evshim.c, CMakeLists.txt         guest-side SDL keepalive shim. Patches
                                    winebus.so's pSDL_JoystickRumble +
                                    pSDL_JoystickClose .bss pointers so
                                    sustained rumble survives SDL's 1 s

@@ -86,13 +86,11 @@ public final class BhVibrationController {
     public static final String PER_GAME_PREFS_FMT = "pc_g_setting%s";
     public static final String PER_GAME_KEY_MODE      = "bh_vibration_mode";
     public static final String PER_GAME_KEY_INTENSITY = "bh_vibration_intensity";
-    /** Per-game opt-out for the libevshim LD_PRELOAD keepalive. Some games
-     *  (notably Shotgun King) silently exit at launch when libevshim is
-     *  mapped into their Wine subprocess address space — verified to be
-     *  pure mmap presence rather than symbols or ctor work. Default true
-     *  (keep keepalive enabled) so other games keep sustained-rumble
-     *  behaviour; user unchecks per-game via BhVibrationSettingsActivity
-     *  to skip libevshim from LD_PRELOAD for that specific game. */
+    /** Per-game opt-out for the engine keepalive LD_PRELOAD entry. The
+     *  envbuilder preloads libevgate, which loads libevshim only inside
+     *  winedevice.exe. Default true keeps sustained-rumble behaviour; user
+     *  unchecks per-game via BhVibrationSettingsActivity if even the gate
+     *  preload breaks a specific game. */
     public static final String PER_GAME_KEY_EVSHIM    = "bh_evshim_enabled";
     public static final String GLOBAL_KEY_MODE      = "mode";
     public static final String GLOBAL_KEY_INTENSITY = "intensity";
@@ -381,7 +379,7 @@ public final class BhVibrationController {
     public int getMode() { return cachedMode; }
     public int getIntensity() { return cachedIntensity; }
 
-    /** Per-game opt-out for libevshim preload. Reads from the current
+    /** Per-game opt-out for the engine keepalive preload. Reads from the current
      *  containerGameId's pc_g_setting<gameId> file. Returns true if the
      *  user hasn't unchecked the toggle (default) or there's no per-game
      *  scope. See shouldPreloadEvshim for the launch-time consumer. */
@@ -496,18 +494,16 @@ public final class BhVibrationController {
     // ─────────────────────────────────────────────────────────────────────────
     // Smali entry 5: bg5.a env builder (LD_PRELOAD construction).
     //
-    // The vibration patch normally prepends <nativeLibDir>/libevshim.so to
-    // LD_PRELOAD for every Wine subprocess so winedevice.exe gets the SDL
-    // keepalive. Empirically a small set of games (Shotgun King is the
-    // first confirmed case) silently exit at launch when libevshim is
-    // mmap'd into their Wine subprocess address space — confirmed via
-    // diagnostic builds to be the .so's pure mmap presence rather than
-    // symbol exports or constructor side effects. Wine's preloader is
-    // famously fussy about address-space layout; whatever it does for
-    // these specific games conflicts with our extra mapping.
+    // The vibration patch prepends <nativeLibDir>/libevgate.so to LD_PRELOAD.
+    // The gate library maps into the Wine process tree, but it only dlopen()s
+    // libevshim.so when /proc/self/cmdline is winedevice.exe. Empirically a
+    // small set of games (Shotgun King is the first confirmed case) silently
+    // exit at launch when libevshim itself is mmap'd into their Wine process.
+    // This keeps the actual evshim mapping out of the game process while still
+    // letting winedevice.exe patch winebus and keep SDL rumble alive.
     //
     // The smali patch in bg5.a() calls this from the LD_PRELOAD builder
-    // BEFORE adding libevshim to the env list. We resolve the launching
+    // BEFORE adding libevgate to the env list. We resolve the launching
     // game from the live WineActivity in the activity stack, read its
     // pc_g_setting<gameId> pref for "bh_evshim_enabled", and return false
     // if the user has unchecked the per-game keepalive toggle. Default
@@ -515,13 +511,11 @@ public final class BhVibrationController {
     // game.
     //
     // Returning false here causes the smali helper to skip the
-    // ArrayList.add() — libevshim is never added to LD_PRELOAD, the
-    // dynamic linker never maps it into Wine subprocess address space,
-    // and the game launches normally. To keep sustained rumble working in
-    // those games, we also patch the app-owned winebus.so on disk so the
-    // nonzero SDL rumble start calls use a non-expiring duration. Smali
-    // patches 1-3 still work either way (dual-motor dispatch + instant
-    // release).
+    // ArrayList.add() — libevgate is never added to LD_PRELOAD. To keep
+    // sustained rumble working even when the gate is disabled, we also patch
+    // the app-owned winebus.so on disk so the nonzero SDL rumble start calls
+    // use a non-expiring duration. Smali patches 1-3 still work either way
+    // (dual-motor dispatch + instant release).
     // ─────────────────────────────────────────────────────────────────────────
     public static boolean shouldPreloadEvshim(Context ctx) {
         try {
@@ -691,7 +685,7 @@ public final class BhVibrationController {
         return -1;
     }
 
-    /** Settings-UI helper: global enable/disable for libevshim preload.
+    /** Settings-UI helper: global enable/disable for engine keepalive preload.
      *  Writes/deletes the <filesDir>/.bh_skip_evshim marker. */
     public static void setEvshimGlobalEnabled(Context ctx, boolean enabled) {
         if (ctx == null) return;
@@ -702,7 +696,7 @@ public final class BhVibrationController {
             } else if (!marker.exists()) {
                 marker.createNewFile();
             }
-            Log.i(TAG, "evshim global preload " + (enabled ? "ENABLED" : "DISABLED"));
+            Log.i(TAG, "engine keepalive preload " + (enabled ? "ENABLED" : "DISABLED"));
         } catch (Throwable t) {
             Log.w(TAG, "setEvshimGlobalEnabled failed", t);
         }
