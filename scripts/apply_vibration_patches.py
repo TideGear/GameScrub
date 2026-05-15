@@ -1,41 +1,17 @@
 #!/usr/bin/env python3
 """
 Apply PC-accurate vibration patches to a decompiled GameHub apktool tree.
-Supports stock 5.3.5 and 6.0.4 — version is auto-detected from the
-smali class layout.
+Supports stock 6.0.4 only.
 
-Hooks (5.3.5 keeps unobfuscated symbols; 6.0.4 has ProGuard renames
-encoded in RENAMES_6X):
+Hooks:
 
   1. GamepadServerManager.onRumble(III)V  — entry hook for the dispatcher
-  2. <Physical>.<dispatch>(II)V            — per-controller rumble dispatch
-                                             (h(II)V in 5.3.5; g(II)V in 6.0.4)
-  3. <Physical>.<stop>()V                  — stop hook for keepalive cleanup
-                                             (g()V in 5.3.5; f()V in 6.0.4)
+  2. <Physical>.g(II)V                     — per-controller rumble dispatch
+  3. <Physical>.f()V                       — stop hook for keepalive cleanup
   4. <EnvBuilder>.smali pre-launch hook    — call BhVibrationController to
                                              patch every winebus.so on disk
                                              once per app process (preload-
-                                             free SDL rumble keepalive).
-                                             5.3.5 also prepends
-                                             libsdlpreload.so to LD_PRELOAD
-                                             (see note below).
-
-NOTE 1: 5.3.5's Patch 4 prepends libsdlpreload.so to LD_PRELOAD in addition
-to triggering the disk patch. Stock 5.3.5 leaves libSDL2-2.0.so reachable
-only via libvfs.so's RTLD_LOCAL dlopen, so SteamAgent2's Wine PE can't
-resolve SDL symbols cleanly and reports init_failed=1004 to GameHub's
-SteamAgentServer (blocking the Steam-button launch path). libsdlpreload.so
-is a tiny constructor-only library whose only job is dlopen("libSDL2-2.0.so",
-RTLD_NOW|RTLD_GLOBAL) in each Wine subprocess that needs SDL. 6.0.x fixed
-the namespace issue natively, so the 6.0.4 patch path stays strictly
-preload-free (no .so added to LD_PRELOAD).
-
-NOTE 2: 5.3.5's GamepadManager.B0 wake-up (multi-controller libvfs lazy-
-attach fix) is not currently restored — it relied on a runtime marker from
-the removed libevshim. Single-controller use on 5.3.5 works without it;
-multi-controller users may have to press a button on each controller after
-connect to trigger SDL_JOYDEVICEADDED. 6.0.x doesn't need this because the
-6.0 gamepad-subsystem refactor fixed lazy-attach natively.
+                                             free SDL rumble keepalive)
 
 Per-version ProGuard rename maps are baked into RENAMES_6X below.
 
@@ -78,10 +54,6 @@ def patch(path, old, new, label):
 # Each entry maps version -> a (path, must_exist) probe whose presence is a
 # reliable signature for that base version's apktool layout.
 VERSION_PROBES = {
-    "5.3.5": (
-        "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali",
-        "smali_classes7/com/winemu/core/controller/EnvironmentController.smali",
-    ),
     "6.0.4": (
         "smali_classes3/ab8.smali",
         "smali_classes3/bg5.smali",
@@ -317,180 +289,6 @@ def apply_6x(root: Path, version: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5.3.5 patches
-# ---------------------------------------------------------------------------
-
-# Stock 5.3.5 ships unobfuscated symbol names — all four anchors live under
-# smali_classes7/com/winemu/core/{controller,gamepad}/. Method names differ
-# from 6.0.x: dispatch is .h(II)V (not .g) and stop is .g()V (not .f).
-# The deviceId field is .d:I rather than .f:I. The LD_PRELOAD env builder is
-# the named EnvironmentController class (no joinToString helper — uses a
-# List<String> directly), so Patch 4's anchor is the const-string "LD_PRELOAD"
-# right before EnvVars.f(...). Patch 4 in this build only triggers the
-# disk-patch helper; no LD_PRELOAD modification (preload-free architecture).
-
-def apply_535(root: Path) -> None:
-    print("  Layout:           smali_classes7/com/winemu/core/{controller,gamepad}/")
-    print("  Symbols:          stock 5.3.5 ships unobfuscated.")
-    print()
-
-    # Patch 1: GamepadServerManager.onRumble(III)V — entry hook.
-    # 5.3.5's `if-ltz` guard targets :cond_0 (vs :cond_4 in 6.0.x);
-    # otherwise structurally identical to the 6.0.x patch.
-    patch(
-        root / "smali_classes7/com/winemu/core/gamepad/GamepadServerManager.smali",
-        ".method private final onRumble(III)V\n"
-        "    .locals 2\n"
-        "    .annotation build Landroidx/annotation/Keep;\n"
-        "    .end annotation\n"
-        "\n"
-        "    .line 1\n"
-        "    if-ltz p1, :cond_0\n",
-        ".method private final onRumble(III)V\n"
-        "    .locals 2\n"
-        "    .annotation build Landroidx/annotation/Keep;\n"
-        "    .end annotation\n"
-        "\n"
-        "    # BH: PC-accurate rumble dispatcher hook\n"
-        "    invoke-static {p1, p2, p3}, Lcom/xj/winemu/vibration/BhVibrationController;->onRumble(III)Z\n"
-        "\n"
-        "    move-result v0\n"
-        "\n"
-        "    if-eqz v0, :bh_rumble_fallthrough\n"
-        "\n"
-        "    return-void\n"
-        "\n"
-        "    :bh_rumble_fallthrough\n"
-        "\n"
-        "    .line 1\n"
-        "    if-ltz p1, :cond_0\n",
-        "GamepadServerManager.onRumble(III)V: inject BhVibrationController entry hook"
-    )
-
-    # Patch 2: GamepadDevice$Physical.h(II)V — controller dispatch delegate.
-    # deviceId is in field d:I in 5.3.5 (vs f:I in 6.0.x). Same skip-stock-
-    # fallback semantics as the 6.0.x patch.
-    patch(
-        root / "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali",
-        ".method public h(II)V\n"
-        "    .locals 3\n"
-        "\n"
-        "    .line 1\n"
-        "    const v0, 0xffff\n",
-        ".method public h(II)V\n"
-        "    .locals 3\n"
-        "\n"
-        "    # BH: PC-accurate controller dispatch (dual-motor)\n"
-        "    iget v0, p0, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->d:I\n"
-        "\n"
-        "    invoke-static {v0, p1, p2}, Lcom/xj/winemu/vibration/BhVibrationController;->dispatchToController(III)Z\n"
-        "\n"
-        "    move-result v0\n"
-        "\n"
-        "    if-eqz v0, :bh_phys_fallthrough\n"
-        "\n"
-        "    return-void\n"
-        "\n"
-        "    :bh_phys_fallthrough\n"
-        "\n"
-        "    .line 1\n"
-        "    const v0, 0xffff\n",
-        "GamepadDevice$Physical.h(II)V: inject BhVibrationController.dispatchToController"
-    )
-
-    # Patch 3: GamepadDevice$Physical.g()V — stop hook. Stock f(II)V routes
-    # (0,0) -> g() and non-zero -> h(II)V; Patch 2 only catches h, so (0,0)
-    # would bypass the keepalive otherwise. onStop is void; on 5.3.5 it
-    # also issues the Samsung-HAL pre-cancel supersede before falling
-    # through to stock g() (which iterates vibrators and cancels each).
-    patch(
-        root / "smali_classes7/com/winemu/core/gamepad/GamepadDevice$Physical.smali",
-        ".method public g()V\n"
-        "    .locals 1\n"
-        "\n"
-        "    .line 1\n"
-        "    invoke-virtual {p0}, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->o()Ljava/util/List;\n",
-        ".method public g()V\n"
-        "    .locals 1\n"
-        "\n"
-        "    # BH: dispatch to our handler (supersede pattern), then fall through.\n"
-        "    iget v0, p0, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->d:I\n"
-        "    invoke-static {v0}, Lcom/xj/winemu/vibration/BhVibrationController;->onStop(I)V\n"
-        "\n"
-        "    .line 1\n"
-        "    invoke-virtual {p0}, Lcom/winemu/core/gamepad/GamepadDevice$Physical;->o()Ljava/util/List;\n",
-        "GamepadDevice$Physical.g(): inject BhVibrationController.onStop pre-cancel supersede"
-    )
-
-    # Patch 4: EnvironmentController.b(Wine, String) — prepend
-    # libsdlpreload.so to LD_PRELOAD and trigger the pre-launch winebus
-    # disk patch.
-    #
-    # 5.3.5's env-builder uses a plain List<String> in v1 (not the v12
-    # ArrayList of 6.0.x's joinToString flow). We anchor on the unique
-    # `:cond_2 :goto_1 const-string v2, "LD_PRELOAD"` join point right
-    # before EnvVars.f("LD_PRELOAD", v1).
-    #
-    # Why libsdlpreload.so on 5.3.5: stock 5.3.5 loads libSDL2-2.0.so in
-    # libvfs.so's private (RTLD_LOCAL) namespace, so SteamAgent2's Wine PE
-    # can't resolve SDL symbols cleanly and reports init_failed=1004 to
-    # GameHub's SteamAgentServer, blocking the Steam-button launch path.
-    # BannerHub's libevshim.so accidentally fixed this as a side effect of
-    # its preload_sdl_global() call; once we went preload-free that side
-    # effect disappeared. libsdlpreload.so exists solely to dlopen libSDL2
-    # with RTLD_GLOBAL in its constructor — no SDL interpose, no keepalive
-    # thread. 6.0.4 doesn't need this (Tencent fixed the namespace issue
-    # there natively) and the 6.0.4 patch path stays strictly preload-free.
-    #
-    # Why also call ensureWinebusDurationPatchOnce here: sustained rumble
-    # past SDL's ~1 s expiry needs the on-disk winebus.so duration patch
-    # regardless of architecture. AtomicBoolean inside the Java method
-    # gates against repeat scans.
-    #
-    # v2/v3 are clobbered by the const-string and StringBuilder usage; safe
-    # to reuse for the path build + File.exists check.
-    patch(
-        root / "smali_classes7/com/winemu/core/controller/EnvironmentController.smali",
-        "    :cond_2\n"
-        "    :goto_1\n"
-        "    const-string v2, \"LD_PRELOAD\"\n",
-        "    :cond_2\n"
-        "    :goto_1\n"
-        "\n"
-        "    # BH: prepend libsdlpreload.so to LD_PRELOAD list (Wine SDL2\n"
-        "    # RTLD_GLOBAL fixup — 5.3.5 SteamAgent2 init dependency).\n"
-        "    iget-object v2, p0, Lcom/winemu/core/controller/EnvironmentController;->a:Landroid/content/Context;\n"
-        "    invoke-virtual {v2}, Landroid/content/Context;->getApplicationInfo()Landroid/content/pm/ApplicationInfo;\n"
-        "    move-result-object v2\n"
-        "    iget-object v2, v2, Landroid/content/pm/ApplicationInfo;->nativeLibraryDir:Ljava/lang/String;\n"
-        "    new-instance v3, Ljava/lang/StringBuilder;\n"
-        "    invoke-direct {v3}, Ljava/lang/StringBuilder;-><init>()V\n"
-        "    invoke-virtual {v3, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;\n"
-        "    const-string v2, \"/libsdlpreload.so\"\n"
-        "    invoke-virtual {v3, v2}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;\n"
-        "    invoke-virtual {v3}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;\n"
-        "    move-result-object v2\n"
-        "    new-instance v3, Ljava/io/File;\n"
-        "    invoke-direct {v3, v2}, Ljava/io/File;-><init>(Ljava/lang/String;)V\n"
-        "    invoke-virtual {v3}, Ljava/io/File;->exists()Z\n"
-        "    move-result v3\n"
-        "    if-eqz v3, :bh_skip_sdlpreload\n"
-        "    const/4 v3, 0x0\n"
-        "    invoke-interface {v1, v3, v2}, Ljava/util/List;->add(ILjava/lang/Object;)V\n"
-        "    :bh_skip_sdlpreload\n"
-        "\n"
-        "    # BH: preload-free SDL rumble keepalive — patch every winebus.so\n"
-        "    # on disk once per app process. AtomicBoolean inside the Java\n"
-        "    # method gates against repeat scans.\n"
-        "    iget-object v2, p0, Lcom/winemu/core/controller/EnvironmentController;->a:Landroid/content/Context;\n"
-        "    invoke-static {v2}, Lcom/xj/winemu/vibration/BhVibrationController;->ensureWinebusDurationPatchOnce(Landroid/content/Context;)V\n"
-        "\n"
-        "    const-string v2, \"LD_PRELOAD\"\n",
-        "EnvironmentController.b(Wine, String): prepend libsdlpreload.so + disk-patch trigger"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -506,9 +304,7 @@ def main():
     version = detect_version(root)
     print(f"Detected GameHub base version: {version}")
 
-    if version == "5.3.5":
-        apply_535(root)
-    elif version in RENAMES_6X:
+    if version in RENAMES_6X:
         apply_6x(root, version)
     else:
         # Unreachable: detect_version already validated.

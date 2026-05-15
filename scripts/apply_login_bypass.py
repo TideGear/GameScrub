@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Apply login-bypass patches to a decompiled GameHub apktool tree.
-Supports stock 6.0.4 only — 5.3.5 uses a different auth flow that this
-build does not currently bypass.
+Supports stock 6.0.4 only.
 
 Effect: make the app's "is logged in" gate report true unconditionally
 so the launcher Activity proceeds straight to the home screen instead
