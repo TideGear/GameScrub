@@ -86,11 +86,9 @@ public final class BhVibrationController {
     public static final String PER_GAME_PREFS_FMT = "pc_g_setting%s";
     public static final String PER_GAME_KEY_MODE      = "bh_vibration_mode";
     public static final String PER_GAME_KEY_INTENSITY = "bh_vibration_intensity";
-    /** Per-game opt-out for the engine keepalive LD_PRELOAD entry. The
-     *  envbuilder preloads libevgate, which loads libevshim only inside
-     *  winedevice.exe. Default true keeps sustained-rumble behaviour; user
-     *  unchecks per-game via BhVibrationSettingsActivity if even the gate
-     *  preload breaks a specific game. */
+    /** Legacy key from builds that exposed an Engine keepalive checkbox.
+     *  Kept only so old exports/imports do not collide with anything else;
+     *  launch-time keepalive now defaults on unconditionally. */
     public static final String PER_GAME_KEY_EVSHIM    = "bh_evshim_enabled";
     public static final String GLOBAL_KEY_MODE      = "mode";
     public static final String GLOBAL_KEY_INTENSITY = "intensity";
@@ -503,49 +501,21 @@ public final class BhVibrationController {
     // letting winedevice.exe patch winebus and keep SDL rumble alive.
     //
     // The smali patch in bg5.a() calls this from the LD_PRELOAD builder
-    // BEFORE adding libevgate to the env list. We resolve the launching
-    // game from the live WineActivity in the activity stack, read its
-    // pc_g_setting<gameId> pref for "bh_evshim_enabled", and return false
-    // if the user has unchecked the per-game keepalive toggle. Default
-    // true (no pref written) preserves stock behaviour for every other
-    // game.
+    // BEFORE adding libevgate to the env list. Older builds tried to drive
+    // this from a per-game setting, but the settings entry point is brittle
+    // in stock GameHub. Default the winedevice-only gate on unconditionally
+    // so stale pref files cannot disable the SK test path.
     //
-    // Returning false here causes the smali helper to skip the
-    // ArrayList.add() — libevgate is never added to LD_PRELOAD. To keep
-    // sustained rumble working even when the gate is disabled, we also patch
-    // the app-owned winebus.so on disk so the nonzero SDL rumble start calls
-    // use a non-expiring duration. Smali patches 1-3 still work either way
-    // (dual-motor dispatch + instant release).
+    // Returning true lets the smali helper add libevgate to LD_PRELOAD.
+    // We also patch the app-owned winebus.so on disk so the nonzero SDL
+    // rumble start calls use a non-expiring duration. Smali patches 1-3 are
+    // independent (dual-motor dispatch + instant release).
     // ─────────────────────────────────────────────────────────────────────────
     public static boolean shouldPreloadEvshim(Context ctx) {
         try {
-            if (ctx == null) return true;
-            ensureWinebusDurationPatch(ctx);
-            // Global override: <filesDir>/.bh_skip_evshim. Takes precedence
-            // over per-game so users have a deterministic escape hatch for
-            // the case where bg5.a() runs before WineActivity reaches the
-            // activity stack (per-game pref can't be located until then,
-            // and we don't want to crash a problematic game even once
-            // before the per-game toggle takes effect). Setting/clearing
-            // this marker is what the Settings UI's "Engine keepalive"
-            // checkbox does.
-            if (new File(ctx.getFilesDir(), ".bh_skip_evshim").exists()) {
-                Log.i(TAG, "shouldPreloadEvshim=false (global marker)");
-                return false;
-            }
-            String gameId = resolveLaunchingGameId();
-            if (gameId == null) {
-                // No WineActivity in scope yet — first launch flow may
-                // call into bg5.a() before the activity is registered. Be
-                // conservative and preload; the user can flip the global
-                // marker if they hit a game that breaks on first launch.
-                return true;
-            }
-            SharedPreferences perGame = ctx.getSharedPreferences(
-                    String.format(PER_GAME_PREFS_FMT, gameId), Context.MODE_PRIVATE);
-            boolean enabled = perGame.getBoolean(PER_GAME_KEY_EVSHIM, true);
-            Log.i(TAG, "shouldPreloadEvshim gameId=" + gameId + " enabled=" + enabled);
-            return enabled;
+            if (ctx != null) ensureWinebusDurationPatch(ctx);
+            Log.i(TAG, "shouldPreloadEvshim=true (default winedevice-only gate)");
+            return true;
         } catch (Throwable t) {
             Log.w(TAG, "shouldPreloadEvshim failed — defaulting to enabled", t);
             return true;
