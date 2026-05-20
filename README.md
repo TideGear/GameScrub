@@ -1,4 +1,4 @@
-# GameHub Vibration Fix
+# GameScrub
 
 > **Built on the shoulders of [BannerHub](https://github.com/The412Banner/BannerHub) by [@The412Banner](https://github.com/The412Banner).**
 > The original 5.3.5-based BannerHub project pioneered the apktool-driven
@@ -8,12 +8,14 @@
 > GOG store integration, Component Manager, RTS touch controls, HUD
 > overlays, root access management, frontend export, etc.), use BannerHub
 > upstream — that's the real project. This fork is a deliberate strip-down
-> of just the vibration mod, supporting stock 6.0.4.
+> to just the vibration fix plus the privacy patch set, supporting stock 6.0.4.
 
 A minimal patch on top of stock GameHub 6.0.4 that adds
-**PC-accurate XInput rumble support** for Wine games. Nothing else is
-changed. This is for the sake of having the working achievements of
-stock GameHub plus fixed vibration.
+**PC-accurate XInput rumble support** for Wine games and **strips
+unnecessary telemetry**. Otherwise unchanged from upstream. The point is
+to keep stock GameHub's working achievements / library / online features
+while fixing vibration and silencing the XiaoJi / Firebase / Mob /
+Google analytics channels.
 
 What you get over stock GameHub:
 
@@ -33,6 +35,12 @@ What you get over stock GameHub:
   applies the same patch to extracted components for offline use.
 - **Instant release** when the game stops rumble — no phantom-suppression
   timer extending the motor past the actual stop call.
+- **Privacy patches** — port of bannerhub-revanced's privacy patch set.
+  Kills Firebase Analytics, Google Play Services Measurement, Mob Push
+  SDK, the XiaoJi heartbeat / playtime tracker, both vgabc.com /events
+  endpoints, and the JieLi OTA phone-home. Steam / GOG / Epic / Wine /
+  account login are untouched. Full channel list in
+  [scripts/apply_privacy_patches.py](scripts/apply_privacy_patches.py).
 
 ### Preload-free architecture
 
@@ -81,6 +89,18 @@ ProGuard names `ab8` (Physical), `bg5` (env builder), `ps2.I0`
 (joinToString helper). Full anchor set and rename map are at the top of
 the script.
 
+`scripts/apply_privacy_patches.py` is a port of the bannerhub-revanced
+privacy patch set. Manifest layer adds Firebase kill-switch meta-data,
+disables Google Play Services Measurement components, strips ad-ID
+permission declarations, disables every Mob / cn.fly component, and
+removes the JieLi gamepad-firmware native libs. Smali layer stubs the
+two `statistic-gamehub-api.vgabc.com` event endpoints, the four
+heartbeat/playtime methods, the OTA URL register, and the three Mob SDK
+bootstrap invokes. Anchors and the full deliberate-skip list live at the
+top of the script. Trade-off worth flagging: GameHub's in-app per-game
+playtime UI renders empty (Steam's own playtime on your Steam profile
+is unaffected — Steam tracks playtime independently).
+
 The pipeline:
 
 1. `apktool d` the base APK
@@ -88,13 +108,13 @@ The pipeline:
    `android:enableOnBackInvokedCallback` from the manifest (apktool 2.9.3's
    bundled aapt2 doesn't know them; cosmetic, harmless)
 3. `python3 scripts/apply_vibration_patches.py` — four smali hooks
-4. (optional) `python3 scripts/apply_login_bypass.py` — patch the
-   auth-state combiner + privacy-popup gate
+4. `python3 scripts/apply_privacy_patches.py` — manifest + smali +
+   native-lib strip
 5. `apktool b`
 6. `javac + d8` of the two `extension/Bh*.java` files → next free
    `classesN.dex` slot (classes7), inject into the APK
 7. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
-8. Upload as `GameHub-Vibration-Fix-6.0.4.apk`
+8. Upload as `GameScrub-6.0.4.apk`
 
 ## Project layout
 
@@ -108,6 +128,10 @@ extension/
 scripts/
   apply_vibration_patches.py       smali hooks against a decompiled
                                    GameHub 6.0.4 apktool tree.
+  apply_privacy_patches.py         manifest + smali + native-lib edits
+                                   that kill Firebase / GMS Measurement
+                                   / Mob Push / XiaoJi events + heartbeat
+                                   / JieLi OTA.
   patch_winebus_rumble_duration.py offline preload-free patch for
                                    extracted winebus.so (aarch64 + x86_64).
 

@@ -1,9 +1,11 @@
 name: Build APK
 
-# GameHub with PC-accurate XInput rumble — the vibration mod only,
-# nothing else. Adds dual-motor low/high dispatch + preload-free SDL
-# rumble keepalive (winebus.so duration patched on disk) on top of stock
-# GameHub 6.0.4. Otherwise unchanged from upstream Tencent build.
+# GameScrub — GameHub with PC-accurate XInput rumble plus a port of
+# bannerhub-revanced's privacy patch set. Adds dual-motor low/high
+# dispatch + preload-free SDL rumble keepalive (winebus.so duration
+# patched on disk) and kills Firebase / GMS Measurement / Mob Push /
+# XiaoJi heartbeat+events / JieLi OTA on top of stock GameHub 6.0.4.
+# Otherwise unchanged from upstream Tencent build.
 #
 # One-time setup: upload the original GameHub APK as an asset on a
 # release tagged `base-apk-6.0.4` in this repo. The workflow
@@ -14,12 +16,6 @@ on:
     tags:
       - 'v*-6.0.4*'
   workflow_dispatch:
-    inputs:
-      bypass_login:
-        description: 'Bypass the GameHub login screen and the splash privacy popup.'
-        required: false
-        default: false
-        type: boolean
 
 jobs:
   build:
@@ -86,14 +82,16 @@ jobs:
           # of the script.
           python3 scripts/apply_vibration_patches.py apktool_out
 
-      - name: Apply login bypass (optional)
-        if: inputs.bypass_login == true
+      - name: Apply privacy patches
         run: |
-          # Rewrites the isLoggedIn-combiner lambda's invokeSuspend body
-          # to return Boolean.TRUE (skips login screen) and shorts the
-          # SharedPreferences getter for "app_agreement_agreed" to
-          # always return true (skips the splash privacy popup).
-          python3 scripts/apply_login_bypass.py apktool_out
+          # Port of bannerhub-revanced's privacy patch set, scoped to this
+          # fork's apktool/Python pipeline. Kills Firebase Analytics +
+          # GMS Measurement + Mob Push + the two vgabc.com /events endpoints
+          # + the heartbeat playtime tracker + the JieLi OTA URL/native libs.
+          # See scripts/apply_privacy_patches.py docstring for the full
+          # channel list and the deliberately-skipped surface (Crashlytics
+          # settings probe, Steam / GOG / Epic, image CDNs).
+          python3 scripts/apply_privacy_patches.py apktool_out
 
       - name: Rebuild and sign
         run: |
@@ -133,14 +131,14 @@ jobs:
               rebuilt-unsigned.apk rebuilt-aligned.apk
 
           # Sign with the repo's testkey.
-          OUT="GameHub-Vibration-Fix-${{ steps.base.outputs.version }}.apk"
+          OUT="GameScrub-${{ steps.base.outputs.version }}.apk"
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/apksigner sign \
               --key testkey.pk8 --cert testkey.x509.pem \
               --out "$OUT" \
               rebuilt-aligned.apk
           ls -lh "$OUT"
           echo "out_apk=$OUT" >> "$GITHUB_ENV"
-          echo "out_artifact=GameHub-Vibration-Fix-${{ steps.base.outputs.version }}" >> "$GITHUB_ENV"
+          echo "out_artifact=GameScrub-${{ steps.base.outputs.version }}" >> "$GITHUB_ENV"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
