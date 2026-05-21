@@ -12,6 +12,12 @@ also includes my own PC-accurate controller vibration fixes.
 
 What you get over stock GameHub:
 
+- **Privacy patches** — Login-friendly port of bannerhub-revanced's privacy
+  patch set. Kills Firebase Analytics, Google Play Services Measurement, Mob
+  Push SDK, the XiaoJi heartbeat / playtime tracker, both vgabc.com /events
+  endpoints, and the JieLi OTA phone-home. Steam / GOG / Epic / Wine /
+  account login are untouched. Full channel list in
+  [scripts/apply_privacy_patches.py](scripts/apply_privacy_patches.py).
 - **Dual-motor low/high dispatch.** Wine games calling `XInputSetState(slot,
   low, high)` get the two motors driven independently via Android
   `CombinedVibration.startParallel` on ≥ 2-motor controllers. Stock GameHub
@@ -28,12 +34,6 @@ What you get over stock GameHub:
   applies the same patch to extracted components for offline use.
 - **Instant release** when the game stops rumble — no phantom-suppression
   timer extending the motor past the actual stop call.
-- **Privacy patches** — port of bannerhub-revanced's privacy patch set.
-  Kills Firebase Analytics, Google Play Services Measurement, Mob Push
-  SDK, the XiaoJi heartbeat / playtime tracker, both vgabc.com /events
-  endpoints, and the JieLi OTA phone-home. Steam / GOG / Epic / Wine /
-  account login are untouched. Full channel list in
-  [scripts/apply_privacy_patches.py](scripts/apply_privacy_patches.py).
 
 ### Preload-free architecture
 
