@@ -3,6 +3,7 @@ package com.xj.winemu.vibration;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -60,6 +61,9 @@ public class BhVibrationSettingsActivity extends Activity {
         density = getResources().getDisplayMetrics().density;
         getWindow().setBackgroundDrawable(new ColorDrawable(0xCC000000));
 
+        final boolean isLandscape = getResources().getConfiguration().orientation
+                == Configuration.ORIENTATION_LANDSCAPE;
+
         String gameId   = getIntent() != null ? getIntent().getStringExtra(EXTRA_GAME_ID)   : null;
         String gameName = getIntent() != null ? getIntent().getStringExtra(EXTRA_GAME_NAME) : null;
 
@@ -113,10 +117,13 @@ public class BhVibrationSettingsActivity extends Activity {
         titleRow.setLayoutParams(titleLp);
         root.addView(titleRow);
 
-        // ── Mode + Intensity in a single row (left = mode, right = intensity)
-        // to keep the dialog short enough for landscape phone screens.
+        // Landscape: Mode + Intensity side-by-side (keeps the dialog short).
+        // Portrait: stack Intensity below Mode so the dialog doesn't run wider
+        // than the screen and clip "Vibration Settings" / "Controller" /
+        // the Close button. The dialog is centered by the default Translucent
+        // theme but its content was sized for landscape only.
         LinearLayout controlsRow = new LinearLayout(this);
-        controlsRow.setOrientation(LinearLayout.HORIZONTAL);
+        controlsRow.setOrientation(isLandscape ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
 
         LinearLayout modeCol = new LinearLayout(this);
         modeCol.setOrientation(LinearLayout.VERTICAL);
@@ -138,10 +145,12 @@ public class BhVibrationSettingsActivity extends Activity {
 
         // Mode column: wrap_content so the spinner is wide enough to render
         // "Controller" (the longest option label) without truncating to
-        // "Control.." Intensity below takes the remaining space.
+        // "Control..". In landscape, intensity sits to the right so we
+        // pad right; in portrait, it stacks below so we swap to bottom.
         LinearLayout.LayoutParams modeColLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        modeColLp.rightMargin = dp(16);
+        if (isLandscape) modeColLp.rightMargin = dp(16);
+        else modeColLp.bottomMargin = dp(12);
         controlsRow.addView(modeCol, modeColLp);
 
         LinearLayout intCol = new LinearLayout(this);
@@ -168,8 +177,14 @@ public class BhVibrationSettingsActivity extends Activity {
         bar.setProgress(ctl.getIntensity());
         intCol.addView(bar);
 
-        controlsRow.addView(intCol, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        // Landscape: stretch the intensity column to fill the row (weight=1).
+        // Portrait: cap the slider at ~220dp so it doesn't run the full
+        // dialog width, which would force the dialog to grow horizontally
+        // beyond the phone screen and clip the title + Close button.
+        LinearLayout.LayoutParams intColLp = isLandscape
+                ? new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                : new LinearLayout.LayoutParams(dp(220), ViewGroup.LayoutParams.WRAP_CONTENT);
+        controlsRow.addView(intCol, intColLp);
 
         root.addView(controlsRow);
 
