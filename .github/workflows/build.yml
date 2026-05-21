@@ -93,6 +93,19 @@ jobs:
           # settings probe, Steam / GOG / Epic, image CDNs).
           python3 scripts/apply_privacy_patches.py apktool_out
 
+      - name: Apply per-game vibration menu patches
+        run: |
+          # Injects a "PC Vibration Settings" row into the three per-game
+          # menu surfaces (game detail More Menu, library-tile popup,
+          # library-list 3-dot popup) so users can change Mode/Intensity
+          # per game without launching BhVibrationSettingsActivity by adb.
+          # Manifest registers the activity; CVR + resolver short-circuit
+          # carry the row label; index-0 captureGameId pins per-game scope.
+          # See scripts/apply_menu_patches.py docstring for the full anchor
+          # set; if a future base bump shifts the obfuscated class letters
+          # the script fails loudly at the missing anchor.
+          python3 scripts/apply_menu_patches.py apktool_out
+
       - name: Rebuild and sign
         run: |
           set -e
@@ -107,7 +120,9 @@ jobs:
           mkdir -p ext_classes
           javac -source 8 -target 8 -cp "$ANDROID_JAR" -d ext_classes \
               extension/BhVibrationController.java \
-              extension/BhVibrationSettingsActivity.java
+              extension/BhVibrationSettingsActivity.java \
+              extension/BhMenuGameId.java \
+              extension/BhMenuRowClick.java
           BUILD_TOOLS=$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)
           mkdir -p ext_dex
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/d8 \

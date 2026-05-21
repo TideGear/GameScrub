@@ -2,9 +2,9 @@
 
 The idea of GameScrub is to fix controller vibration, remove privacy
 issues, and still allow login to GameHub for the actually useful
-features like recommended per-game settings, personalized game
-recommendations, library sync (so install/uninstall and library state
-across devices keep working), and per-account settings sync.
+features like recommended per-game settings, sharing of on-screen
+control layouts, and library sync (so install/uninstall and library
+state across devices keep working).
 
 It is built on GameHub v6.x and heavily uses the work of
 [@The412Banner](https://github.com/The412Banner) as well as others. It
@@ -67,6 +67,33 @@ inspected with `adb pull` and the pattern refined.
 
 The PC Vibration Settings dialog only controls Mode and Intensity.
 
+### Per-game menu UI
+
+Ported from bannerhub-revanced's `VibrationMenu*Patch` set: GameScrub
+injects a **"PC Vibration Settings"** row into all three per-game library
+menu surfaces — the game detail More Menu, the library-tile popup, and
+the library-list 3-dot popup. Tapping it opens
+[BhVibrationSettingsActivity](extension/BhVibrationSettingsActivity.java)
+scoped to the right game (per-game Mode/Intensity persisted to the
+stock `pc_g_setting<gameId>` SharedPreferences file).
+
+The per-game scoping works even from pre-launch menus where no
+`WineActivity` is on the stack: an index-0 `captureGameId(p0)` call
+injected into each of the three menu builders reads the game id from
+the menu-data parameter and mirrors it to a SharedPreferences file
+(cross-process because the menu builders run in the main UI process and
+the eventual launch consumer runs in the `:wine` process). The row's
+click handler reads back via
+[BhMenuGameId.getCaptured()](extension/BhMenuGameId.java).
+
+The label text itself is carried by a Compose Multiplatform string-
+resource short-circuit:
+[BhMenuRowClick.maybeResolveCustomLabel](extension/BhMenuRowClick.java)
+is invoked at the top of the host's resource resolver, returns
+`"PC Vibration Settings"` when our sentinel key
+`string:bh_pc_vibration_label` is requested, and returns `null` for
+everything else so the stock lookup path runs unchanged.
+
 ## Build
 
 CI workflow: `.github/workflows/build.yml` — triggers on `workflow_dispatch`
@@ -94,6 +121,16 @@ top of the script. Trade-off worth flagging: GameHub's in-app per-game
 playtime UI renders empty (Steam's own playtime on your Steam profile
 is unaffected — Steam tracks playtime independently).
 
+`scripts/apply_menu_patches.py` injects the per-game "PC Vibration
+Settings" row into the three per-game menu surfaces (`Lx57;->a` game
+detail, `Lted;->f` library-tile popup, `Lpzc;->j0` library-list 3-dot),
+short-circuits the Compose resource resolver for our label key, registers
+[BhVibrationSettingsActivity](extension/BhVibrationSettingsActivity.java)
+in the manifest, and appends the CVR resource entry to each features.home
+locale bundle. Heavier R8 fragility than the other scripts — fails loudly
+on missing anchors so a future base bump doesn't silently ship a broken
+menu.
+
 The pipeline:
 
 1. `apktool d` the base APK
@@ -103,16 +140,26 @@ The pipeline:
 3. `python3 scripts/apply_vibration_patches.py` — four smali hooks
 4. `python3 scripts/apply_privacy_patches.py` — manifest + smali +
    native-lib strip
-5. `apktool b`
-6. `javac + d8` of the two `extension/Bh*.java` files → next free
+5. `python3 scripts/apply_menu_patches.py` — per-game menu row + manifest
+   activity + CVR resource + resolver short-circuit + 3× gameId capture
+6. `apktool b`
+7. `javac + d8` of the four `extension/Bh*.java` files → next free
    `classesN.dex` slot (classes7), inject into the APK
-7. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
-8. Upload as `GameScrub-6.0.4.apk`
+8. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
+9. Upload as `GameScrub-6.0.4.apk`
 
 ## Project layout
 
 ```
 extension/
+  BhMenuGameId.java                per-game id capture for injected menu
+                                   rows; SharedPreferences mirror crosses
+                                   the main↔":wine" process boundary.
+  BhMenuRowClick.java              Compose menu-row reflection helpers
+                                   (Liae / Lscd / Lz4e ctors) + Lxd3.l1
+                                   resolver short-circuit + click handler
+                                   that launches BhVibrationSettingsActivity
+                                   scoped to BhMenuGameId.getCaptured().
   BhVibrationController.java       singleton dispatcher (smali entry points,
                                    per-game settings, keepalive thread,
                                    in-process winebus.so disk patcher).
@@ -125,6 +172,9 @@ scripts/
                                    that kill Firebase / GMS Measurement
                                    / Mob Push / XiaoJi events + heartbeat
                                    / JieLi OTA.
+  apply_menu_patches.py            per-game "PC Vibration Settings" row
+                                   in all 3 menu surfaces + CVR label +
+                                   resolver short-circuit + gameId capture.
   patch_winebus_rumble_duration.py offline preload-free patch for
                                    extracted winebus.so (aarch64 + x86_64).
 
