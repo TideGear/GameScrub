@@ -61,15 +61,15 @@ public class BhVibrationSettingsActivity extends Activity {
         density = getResources().getDisplayMetrics().density;
         getWindow().setBackgroundDrawable(new ColorDrawable(0xCC000000));
 
-        final boolean isLandscape = getResources().getConfiguration().orientation
-                == Configuration.ORIENTATION_LANDSCAPE;
-
         String gameId   = getIntent() != null ? getIntent().getStringExtra(EXTRA_GAME_ID)   : null;
         String gameName = getIntent() != null ? getIntent().getStringExtra(EXTRA_GAME_NAME) : null;
 
         BhVibrationController ctl = BhVibrationController.getInstance();
         ctl.init(this);
         ctl.setContainerForSettings(gameId);
+
+        final boolean isLandscape = getResources().getConfiguration().orientation
+                == Configuration.ORIENTATION_LANDSCAPE;
 
         // Compact landscape layout: tighter paddings, smaller fonts, no
         // long description block. Wraps in a ScrollView so any future
@@ -118,10 +118,8 @@ public class BhVibrationSettingsActivity extends Activity {
         root.addView(titleRow);
 
         // Landscape: Mode + Intensity side-by-side (keeps the dialog short).
-        // Portrait: stack Intensity below Mode so the dialog doesn't run wider
-        // than the screen and clip "Vibration Settings" / "Controller" /
-        // the Close button. The dialog is centered by the default Translucent
-        // theme but its content was sized for landscape only.
+        // Portrait: stack Intensity below Mode so we can shrink the dialog
+        // width and avoid clipping on phone screens.
         LinearLayout controlsRow = new LinearLayout(this);
         controlsRow.setOrientation(isLandscape ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
 
@@ -145,8 +143,8 @@ public class BhVibrationSettingsActivity extends Activity {
 
         // Mode column: wrap_content so the spinner is wide enough to render
         // "Controller" (the longest option label) without truncating to
-        // "Control..". In landscape, intensity sits to the right so we
-        // pad right; in portrait, it stacks below so we swap to bottom.
+        // "Control.." In landscape, intensity sits to the right; in portrait,
+        // it stacks below so we swap right→bottom margin.
         LinearLayout.LayoutParams modeColLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         if (isLandscape) modeColLp.rightMargin = dp(16);
@@ -177,10 +175,9 @@ public class BhVibrationSettingsActivity extends Activity {
         bar.setProgress(ctl.getIntensity());
         intCol.addView(bar);
 
-        // Landscape: stretch the intensity column to fill the row (weight=1).
-        // Portrait: cap the slider at ~220dp so it doesn't run the full
-        // dialog width, which would force the dialog to grow horizontally
-        // beyond the phone screen and clip the title + Close button.
+        // Landscape: stretch intensity column to fill the row (weight=1).
+        // Portrait: cap the slider at a sensible width (~220dp) so it doesn't
+        // run the full dialog width.
         LinearLayout.LayoutParams intColLp = isLandscape
                 ? new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 : new LinearLayout.LayoutParams(dp(220), ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -209,25 +206,31 @@ public class BhVibrationSettingsActivity extends Activity {
         btnRowLp.topMargin = dp(8);
         btnRow.setLayoutParams(btnRowLp);
 
-        Button close = new Button(this);
-        close.setText("Close");
-        close.setOnClickListener(new View.OnClickListener() {
+        // Cancel = discard; Save = single per-game commit. No live writes,
+        // so seed-time spinner/seekbar callbacks can't persist a default.
+        Button cancel = new Button(this);
+        cancel.setText("Cancel");
+        cancel.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { finish(); }
         });
-        btnRow.addView(close);
+        Button save = new Button(this);
+        save.setText("Save");
+        save.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                ctl.setMode(clampMode(modeSpinner.getSelectedItemPosition()));
+                ctl.setIntensity(bar.getProgress());
+                finish();
+            }
+        });
+        btnRow.addView(cancel);
+        btnRow.addView(save);
         root.addView(btnRow);
 
-        // Wire change handlers → save immediately, no commit button needed.
-        modeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
-                ctl.setMode(pos);
-            }
-            @Override public void onNothingSelected(AdapterView<?> parent) { }
-        });
+        // UI-only: keep the live "%" label; NO persistence here (Save commits).
+        // Mode spinner has no UI side-effect, so it carries no listener.
         bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar sb, int progress, boolean fromUser) {
                 intValue.setText(progress + "%");
-                if (fromUser) ctl.setIntensity(progress);
             }
             @Override public void onStartTrackingTouch(SeekBar sb) { }
             @Override public void onStopTrackingTouch(SeekBar sb) { }
@@ -244,12 +247,16 @@ public class BhVibrationSettingsActivity extends Activity {
 
         FrameLayout wrapper = new FrameLayout(this);
         wrapper.setBackgroundColor(0x00000000);
-        // ~480 dp wide so the side-by-side Mode/Intensity row doesn't squeeze
-        // the Spinner. Height capped at 85 % of the screen — anything taller
-        // becomes scrollable rather than clipped.
+        // Landscape: ~480 dp keeps the side-by-side row uncramped.
+        // Portrait: shrink to fit the screen (cap at screen width minus a
+        // small margin, max 360 dp) since controls stack vertically anyway.
+        int screenW = getResources().getDisplayMetrics().widthPixels;
+        int dialogW = isLandscape
+                ? dp(480)
+                : Math.min(dp(360), screenW - dp(24));
         int maxH = (int) (getResources().getDisplayMetrics().heightPixels * 0.85f);
         FrameLayout.LayoutParams scLp = new FrameLayout.LayoutParams(
-                dp(480), ViewGroup.LayoutParams.WRAP_CONTENT);
+                dialogW, ViewGroup.LayoutParams.WRAP_CONTENT);
         scLp.gravity = Gravity.CENTER;
         wrapper.addView(scroller, scLp);
         scroller.getLayoutParams().height = ViewGroup.LayoutParams.WRAP_CONTENT;
