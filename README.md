@@ -1,21 +1,14 @@
 # GameScrub
 
-> **Built on the shoulders of [BannerHub](https://github.com/The412Banner/BannerHub) by [@The412Banner](https://github.com/The412Banner).**
-> The original 5.3.5-based BannerHub project pioneered the apktool-driven
-> patching pipeline, smali injection patterns, the guest-side SDL
-> keepalive idea, and the vibration-mod architecture this fork is built
-> on. If you want the *full* set of GameHub enhancements (Amazon / Epic /
-> GOG store integration, Component Manager, RTS touch controls, HUD
-> overlays, root access management, frontend export, etc.), use BannerHub
-> upstream — that's the real project. This fork is a deliberate strip-down
-> to just the vibration fix plus the privacy patch set, supporting stock 6.0.4.
+The idea of GameScrub is to fix controller vibration, remove privacy
+issues, and still allow login to GameHub for the actually useful
+features like recommended per-game settings, personalized game
+recommendations, library sync (so install/uninstall and library state
+across devices keep working), and per-account settings sync.
 
-A minimal patch on top of stock GameHub 6.0.4 that adds
-**PC-accurate XInput rumble support** for Wine games and **strips
-unnecessary telemetry**. Otherwise unchanged from upstream. The point is
-to keep stock GameHub's working achievements / library / online features
-while fixing vibration and silencing the XiaoJi / Firebase / Mob /
-Google analytics channels.
+It is built on GameHub v6.x and heavily uses the work of
+[@The412Banner](https://github.com/The412Banner) as well as others. It
+also includes my own PC-accurate controller vibration fixes.
 
 What you get over stock GameHub:
 
