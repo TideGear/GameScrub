@@ -358,8 +358,56 @@ public final class BhMenuRowClick {
             aField.setAccessible(true);
             Object key = aField.get(ell);
             if (key == null) return null;
+
+            String label = null;
             if ("string:bh_pc_vibration_label".equals(key)) {
-                return "PC Vibration Settings";
+                label = "PC Vibration Settings";
+            } else if ("string:bh_vjoy_export_label".equals(key)) {
+                label = "Export to file";
+            } else if ("string:bh_vjoy_import_label".equals(key)) {
+                label = "Import from file";
+            }
+            // VJoy share-flow stock-string OVERRIDES (not new entries; we
+            // hijack the host's own keys before its CVR lookup runs). The
+            // share button now exports to a local .gtheme file, so relabel
+            // the user-visible strings to match.
+            else if ("string:features_vjoy_item_fun_share".equals(key)) {
+                label = "Export";                       // was "Share"
+            } else if ("string:features_vjoy_dialog_prepare_share_title".equals(key)) {
+                label = "Name Profile";                 // was "Publish to Cloud"
+            } else if ("string:features_vjoy_dialog_prepare_share_placeholder".equals(key)) {
+                label = "Profile name";                 // was "Share name"
+            }
+            // NOTE: the post-export "Cloud Backup Code" dialog
+            // (features_vjoy_dialog_share_code_*) is no longer relabeled or
+            // dismissed here — BhVjoyShareHook.interceptShare (the shareMap
+            // hook) THROWS to abort the cloud publish before that dialog is
+            // ever composed, so those resource keys never resolve.
+            // Import: relabel the entry point and use the import-dialog title
+            // resolution as the composition-time signal to fire the SAF file
+            // picker and skip the share-code dialog entirely.
+            else if ("string:features_vjoy_main_action_import".equals(key)) {
+                label = "Import Layout from File";  // was "Import Layout"
+            } else if ("string:features_vjoy_dialog_import_share_code_title".equals(key)) {
+                label = "Import Layout";
+                // This resource ONLY resolves when the import dialog is being
+                // composed, so use it as the "dialog opening" signal and fire
+                // SAF immediately. SAF takes focus over the briefly-composed
+                // dialog; after the user picks/cancels we dismiss the leftover
+                // dialog via a programmatic BACK. IMPORT_IN_FLIGHT (in the hook)
+                // gates against the dozens of recompositions per dialog show.
+                try {
+                    com.xj.winemu.exportcontrols.BhVjoyShareHook.kickImportFromDialogOpen();
+                } catch (Throwable t) {
+                    Log.w(TAG, "kickImportFromDialogOpen threw", t);
+                }
+            } else if ("string:features_vjoy_dialog_import_share_code_placeholder".equals(key)) {
+                label = "Opening file picker…";
+            }
+
+            if (label != null) {
+                Log.i(TAG, "maybeResolveCustomLabel key=" + key + " → '" + label + "'");
+                return label;
             }
         } catch (Throwable t) {
             Log.w(TAG, "maybeResolveCustomLabel error", t);

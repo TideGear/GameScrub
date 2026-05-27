@@ -106,6 +106,21 @@ jobs:
           # the script fails loudly at the missing anchor.
           python3 scripts/apply_menu_patches.py apktool_out
 
+      - name: Apply VJoy export/import patches
+        run: |
+          # Replaces GameHub's cloud-only on-screen-controls share flow with
+          # portable local .gtheme files (no cloud account, no HTTP). Export
+          # reads the pristine pre-CDN layout bytes and saves via SAF; import
+          # fires a SAF file picker at the import-dialog composition, parses
+          # the .gtheme, and registers the layout in egggame.db. The four
+          # bytecode hooks are anchored by server-stable URL fragments
+          # (vcontroller/shareMap | getMapByShareCode | uploadGtheme) and the
+          # upload call-relationship — not R8 letters — so they survive
+          # reshuffles. Label relabels + the import-dialog skip ride on the
+          # Lxd3;->l1 resolver short-circuit installed by the menu patches.
+          # Fails loudly if any anchor is missing or non-unique.
+          python3 scripts/apply_export_controls_patches.py apktool_out
+
       - name: Rebuild and sign
         run: |
           set -e
@@ -122,7 +137,11 @@ jobs:
               extension/BhVibrationController.java \
               extension/BhVibrationSettingsActivity.java \
               extension/BhMenuGameId.java \
-              extension/BhMenuRowClick.java
+              extension/BhMenuRowClick.java \
+              extension/BhSafProxyActivity.java \
+              extension/BhVjoyShareHook.java \
+              extension/BhVjoyImporter.java \
+              extension/BhVjoyJson.java
           BUILD_TOOLS=$(ls $ANDROID_SDK_ROOT/build-tools | sort -V | tail -1)
           mkdir -p ext_dex
           $ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/d8 \

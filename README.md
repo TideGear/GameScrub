@@ -34,6 +34,13 @@ What you get over stock GameHub:
   applies the same patch to extracted components for offline use.
 - **Instant release** when the game stops rumble — no phantom-suppression
   timer extending the motor past the actual stop call.
+- **Local export/import of on-screen control layouts.** The on-screen-controls
+  "Share" / "Apply share code" flow is rerouted from XiaoJi's cloud to portable
+  local `.gtheme` files via the Storage Access Framework — no cloud account, no
+  HTTP. Export captures the pristine pre-CDN layout bytes (full UTF-8 fidelity);
+  import skips the share-code dialog, fires a file picker, and registers the
+  layout straight into `egggame.db` so it shows up in My Layouts. Works from
+  inside a running game (the `:wine` process) too.
 
 ### Preload-free architecture
 
@@ -94,6 +101,54 @@ is invoked at the top of the host's resource resolver, returns
 `string:bh_pc_vibration_label` is requested, and returns `null` for
 everything else so the stock lookup path runs unchanged.
 
+### Local control-layout export/import
+
+Ported from bannerhub-revanced's `ExportControls*Patch` set: GameScrub
+hijacks the four host VJoy share-repository entry points and reroutes them to
+local files instead of XiaoJi's cloud.
+
+**Export.** A hook at the head of the `/vcontroller/uploadGtheme` method
+([BhVjoyShareHook.interceptUpload](extension/BhVjoyShareHook.java)) fires
+*before* the layout is uploaded to Tencent COS. It reflects the upload DTO
+graph for the `okio.Path` of the freshly-serialized `.gtheme` on disk, reads
+those pristine bytes, and hands them to
+[BhSafProxyActivity](extension/BhSafProxyActivity.java) for an
+`ACTION_CREATE_DOCUMENT` save. Pre-CDN capture matters because the CDN
+round-trip used to mangle every byte ≥ 0x80, corrupting non-ASCII layouts.
+The user-typed name from the "Name Profile" dialog is captured at the head of
+the share-name method and used as the SAF suggested filename. A second hook at
+the head of `/vcontroller/shareMap` (`interceptShare`) *throws* — the host
+catches it, deletes its temp file, and treats the publish as failed, so there
+is no cloud upload, no "Cloud Backup Code" dialog, and no navigation to the
+cloud-share tab.
+
+**Import.** The "Import Layout" share-code dialog is skipped entirely. The
+shared `Lxd3;->l1` resolver short-circuit (the same one that carries the menu
+labels) detects the dialog's title resource key at composition time and calls
+[BhVjoyShareHook.kickImportFromDialogOpen](extension/BhVjoyShareHook.java),
+which fires an `ACTION_OPEN_DOCUMENT` picker and dismisses the briefly-composed
+dialog with a synthetic BACK keypress.
+[BhVjoyImporter](extension/BhVjoyImporter.java) parses the picked `.gtheme`,
+deserializes the layout via the host's polymorphic `VJoyLayoutJson` (reached
+through the reflection bridge in [BhVjoyJson](extension/BhVjoyJson.java)), saves
+it through the host's own save coroutine, and inserts a `virtual_key_layout`
+row into `egggame.db` (opened in WAL mode to match Room) so it appears in My
+Layouts. The `/vcontroller/getMapByShareCode` method is also hooked
+(`interceptApply`) as a defensive fallback in case the dialog title key is ever
+renamed.
+
+**Cross-process / in-game.** `BhSafProxyActivity` is registered
+`android:multiprocess="true"` so it launches in the caller's process — the
+import `CompletableFuture` can't bridge the main↔`:wine` boundary, and the
+export path passes its bytes via Intent extras so it is process-agnostic.
+
+`scripts/apply_export_controls_patches.py` anchors the four bytecode hooks by
+**server-stable URL fragments** (`vcontroller/shareMap`, `/getMapByShareCode`,
+`/uploadGtheme`) and the upload call-relationship rather than R8-mangled class
+letters — both survive R8 reshuffles, and the stock-APK dex numbering differs
+from the patched APK the upstream letter map was cut against. It fails loudly
+if any anchor is missing or non-unique.
+
 ## Build
 
 CI workflow: `.github/workflows/build.yml` — triggers on `workflow_dispatch`
@@ -131,6 +186,18 @@ locale bundle. Heavier R8 fragility than the other scripts — fails loudly
 on missing anchors so a future base bump doesn't silently ship a broken
 menu.
 
+`scripts/apply_export_controls_patches.py` reroutes the on-screen-controls
+cloud-share flow to local `.gtheme` files. Registers
+[BhSafProxyActivity](extension/BhSafProxyActivity.java) in the manifest
+(`android:multiprocess="true"`), appends the `bh_vjoy_*_label` CVR entries,
+and injects four bytecode hooks (`interceptShare` at `shareMap`,
+`interceptApply` at `getMapByShareCode`, `interceptUpload` at `uploadGtheme`,
+`captureShareName` at the share-name method). Anchors by server-stable URL
+fragments and the upload call-relationship rather than R8 letters; the label
+relabels and the import-dialog skip reuse the `Lxd3;->l1` resolver
+short-circuit installed by `apply_menu_patches.py`. Fails loudly if any anchor
+is missing or non-unique.
+
 The pipeline:
 
 1. `apktool d` the base APK
@@ -142,11 +209,13 @@ The pipeline:
    native-lib strip
 5. `python3 scripts/apply_menu_patches.py` — per-game menu row + manifest
    activity + CVR resource + resolver short-circuit + 3× gameId capture
-6. `apktool b`
-7. `javac + d8` of the four `extension/Bh*.java` files → next free
+6. `python3 scripts/apply_export_controls_patches.py` — VJoy export/import
+   manifest activity + 4 URL-anchored bytecode hooks + CVR labels
+7. `apktool b`
+8. `javac + d8` of the `extension/Bh*.java` files → next free
    `classesN.dex` slot (classes7), inject into the APK
-8. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
-9. Upload as `GameScrub-6.0.4.apk`
+9. `zipalign + apksigner` with `testkey.pk8` / `testkey.x509.pem`
+10. Upload as `GameScrub-6.0.4.apk`
 
 ## Project layout
 
@@ -164,6 +233,22 @@ extension/
                                    per-game settings, keepalive thread,
                                    in-process winebus.so disk patcher).
   BhVibrationSettingsActivity.java Mode/Intensity dialog UI.
+  BhVjoyShareHook.java             smali entry points for the VJoy share/
+                                   apply/upload hijack: interceptShare
+                                   (throws), interceptUpload (pre-CDN byte
+                                   capture + SAF save), interceptApply +
+                                   kickImportFromDialogOpen (SAF import),
+                                   captureShareName.
+  BhSafProxyActivity.java          translucent SAF host (CREATE_DOCUMENT /
+                                   OPEN_DOCUMENT) for export/import; raw-fd
+                                   IO to avoid the ContentResolver UTF-8
+                                   mangling. multiprocess=true.
+  BhVjoyImporter.java              .gtheme parse → host save coroutine
+                                   (reflection) → virtual_key_layout INSERT
+                                   into egggame.db (WAL mode).
+  BhVjoyJson.java                  reflection bridge to the host's
+                                   polymorphic VJoyLayoutJson for layout
+                                   JSON <-> object conversion.
 
 scripts/
   apply_vibration_patches.py       smali hooks against a decompiled
@@ -175,6 +260,10 @@ scripts/
   apply_menu_patches.py            per-game "PC Vibration Settings" row
                                    in all 3 menu surfaces + CVR label +
                                    resolver short-circuit + gameId capture.
+  apply_export_controls_patches.py VJoy export/import: SAF proxy activity +
+                                   4 URL-anchored bytecode hooks + CVR
+                                   labels. Reroutes cloud share to local
+                                   .gtheme files.
   patch_winebus_rumble_duration.py offline preload-free patch for
                                    extracted winebus.so (aarch64 + x86_64).
 
