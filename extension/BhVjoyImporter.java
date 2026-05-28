@@ -260,14 +260,20 @@ public final class BhVjoyImporter {
     /**
      * Pick a user_id for our INSERT. Strategy: take the most recent
      * non-deleted row's user_id — that's the value the host's own Create
-     * flow uses, which is also what My Layouts filters by. Falls back to
-     * "99999" (upstream's sentinel) only if the table is empty.
+     * flow uses, which is also what My Layouts filters by.
+     *
+     * MUST exclude "99999" — that's upstream's sentinel which earlier
+     * builds wrote and which our own orphan rows still carry; without
+     * the exclusion the picker prefers our own (newest) bad rows over
+     * legitimate older host rows. Falls back to "99999" only if there's
+     * no non-sentinel row to copy from.
      */
     private static String pickUserIdFor(android.database.sqlite.SQLiteDatabase db) {
         try (android.database.Cursor c = db.rawQuery(
                 "SELECT user_id FROM virtual_key_layout "
-                + "WHERE deleted_at IS NULL AND user_id IS NOT NULL "
-                + "AND user_id != '' "
+                + "WHERE deleted_at IS NULL "
+                + "AND user_id IS NOT NULL AND user_id != '' "
+                + "AND user_id != '99999' "
                 + "ORDER BY created_at DESC LIMIT 1", null)) {
             if (c != null && c.moveToFirst()) {
                 String id = c.getString(0);
@@ -276,6 +282,9 @@ public final class BhVjoyImporter {
         } catch (Throwable t) {
             Log.w(TAG, "pickUserIdFor failed", t);
         }
+        Log.w(TAG, "pickUserIdFor: no non-sentinel user_id found; "
+            + "falling back to '99999' (imported layout will be invisible "
+            + "until the host creates a layout first)");
         return "99999";
     }
 
