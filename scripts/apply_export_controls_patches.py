@@ -423,6 +423,62 @@ def patch_bytecode(root: Path) -> None:
         "captureShareName(Ljava/lang/String;)V\n"
     ), "share-name: captureShareName")
 
+    # --- Hooks 5-7: extend the Lxd3 resource-resolver short-circuit to the
+    # non-Compose and format-args variants. apply_menu_patches.py installs the
+    # hook on Lxd3;->l1 (Compose stringResource, single key); but the host
+    # also fetches resource strings via three sibling methods, all taking the
+    # same Lell descriptor:
+    #
+    #   m1(Lell;[Ljava/lang/Object;Lv83;I)Ljava/lang/String;  Compose + args
+    #   P0(Lell;Lbi3;)Ljava/lang/Object;                       suspend
+    #   Q0(Lell;[Ljava/lang/Object;Lbi3;)Ljava/lang/Object;    suspend + args
+    #
+    # The host's "Share failed: %1$s" toast (and other catch-site error
+    # toasts) is fetched from a coroutine catch via Q0 — bypassing the l1
+    # hook entirely. Without this, our maybeResolveCustomLabel override of
+    # e.g. features_vjoy_main_toast_share_failed silently does nothing.
+    #
+    # Same body for all three: pass p0 (the Lell descriptor) to the shared
+    # BhMenuRowClick.maybeResolveCustomLabel; if it returns non-null, early-
+    # return that String (works as both Ljava/lang/String; and Ljava/lang/Object;
+    # since String is an Object). Suspend re-entry has p0=null → resolver
+    # returns null → fallthrough.
+    patch_extra_resolvers(root)
+
+
+RESOLVER_HANDLER = "Lcom/xj/winemu/vibration/BhMenuRowClick;"
+
+EXTRA_RESOLVERS = (
+    (".method public static final m1(Lell;[Ljava/lang/Object;Lv83;I)Ljava/lang/String;",
+     "bh_m1_fallthrough",
+     "xd3.m1 (Compose stringResource with format args)"),
+    (".method public static final P0(Lell;Lbi3;)Ljava/lang/Object;",
+     "bh_p0_fallthrough",
+     "xd3.P0 (suspend getString)"),
+    (".method public static final Q0(Lell;[Ljava/lang/Object;Lbi3;)Ljava/lang/Object;",
+     "bh_q0_fallthrough",
+     "xd3.Q0 (suspend getString with format args)"),
+)
+
+
+def patch_extra_resolvers(root: Path) -> None:
+    p = root / "smali" / "xd3.smali"
+    if not p.is_file():
+        die("smali/xd3.smali not found (apply_menu_patches.py must have run)")
+    for header, label, what in EXTRA_RESOLVERS:
+        body = (
+            f"    # BH: short-circuit non-Compose/format-args resource lookups\n"
+            f"    # the same way Lxd3;->l1 is short-circuited by the menu patch.\n"
+            f"    invoke-static {{p0}}, {RESOLVER_HANDLER}->"
+            f"maybeResolveCustomLabelNoKick(Ljava/lang/Object;)Ljava/lang/String;\n"
+            f"    move-result-object v0\n"
+            f"    if-eqz v0, :{label}\n"
+            f"    return-object v0\n"
+            f"    :{label}\n"
+        )
+        anchor = Anchor(path=p, cls="Lxd3;", header=header, params=[], ret="")
+        inject_at_entry(anchor, body, what)
+
 
 # ---------------------------------------------------------------------------
 # Manifest — register BhSafProxyActivity (translucent, internal-only,

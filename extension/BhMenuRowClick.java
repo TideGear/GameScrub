@@ -353,6 +353,23 @@ public final class BhMenuRowClick {
      * null otherwise so the stock resolver path runs unchanged.
      */
     public static String maybeResolveCustomLabel(Object ell) {
+        return resolveCustomLabel(ell, true);
+    }
+
+    /**
+     * Same as {@link #maybeResolveCustomLabel} but with the
+     * kickImportFromDialogOpen side effect suppressed. Used by the
+     * non-Compose / suspend resolver hooks (Lxd3;->m1/P0/Q0): those paths
+     * exist to surface resource strings outside composition (e.g. toast
+     * format strings), so we want our label overrides to apply but we
+     * absolutely do not want a stray non-Compose lookup of the import-
+     * dialog-title key to launch a SAF file picker behind the user's back.
+     */
+    public static String maybeResolveCustomLabelNoKick(Object ell) {
+        return resolveCustomLabel(ell, false);
+    }
+
+    private static String resolveCustomLabel(Object ell, boolean fireSideEffects) {
         try {
             Field aField = Class.forName("tdi").getDeclaredField("a");
             aField.setAccessible(true);
@@ -396,10 +413,12 @@ public final class BhMenuRowClick {
                 // dialog; after the user picks/cancels we dismiss the leftover
                 // dialog via a programmatic BACK. IMPORT_IN_FLIGHT (in the hook)
                 // gates against the dozens of recompositions per dialog show.
-                try {
-                    com.xj.winemu.exportcontrols.BhVjoyShareHook.kickImportFromDialogOpen();
-                } catch (Throwable t) {
-                    Log.w(TAG, "kickImportFromDialogOpen threw", t);
+                if (fireSideEffects) {
+                    try {
+                        com.xj.winemu.exportcontrols.BhVjoyShareHook.kickImportFromDialogOpen();
+                    } catch (Throwable t) {
+                        Log.w(TAG, "kickImportFromDialogOpen threw", t);
+                    }
                 }
             } else if ("string:features_vjoy_dialog_import_share_code_placeholder".equals(key)) {
                 label = "Opening file picker…";
