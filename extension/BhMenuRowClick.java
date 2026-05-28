@@ -404,6 +404,15 @@ public final class BhMenuRowClick {
             } else if ("string:features_vjoy_dialog_import_share_code_placeholder".equals(key)) {
                 label = "Opening file picker…";
             }
+            // Suppress the host's "Share failed: %1$s" toast that fires after
+            // interceptShare throws. The stock format string interpolates our
+            // exception message ("Share failed: bh_export_local_only"), which
+            // is jarring noise on top of the success toast from
+            // BhSafProxyActivity. Overriding to "" makes String.format produce
+            // an empty string, and Android skips effectively-empty toasts.
+            else if ("string:features_vjoy_main_toast_share_failed".equals(key)) {
+                label = "";
+            }
 
             if (label != null) {
                 Log.i(TAG, "maybeResolveCustomLabel key=" + key + " → '" + label + "'");

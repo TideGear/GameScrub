@@ -112,7 +112,11 @@ public final class BhVjoyShareHook {
         //   - pre28b (this): throw → clean failure, no publish, no
         //     dialog, no navigation, temp file cleaned up by the host.
         if (dto == null) return null; // resume/edge — let host proceed
-        throw new java.io.IOException("bh_export_local_only");
+        // Empty message: the host's catch formats a "Share failed: %1$s"
+        // toast using e.getMessage(). We override that resource string to ""
+        // via the Lxd3;->l1 resolver so the toast collapses to empty; the
+        // empty message here is belt-and-braces if that override ever misses.
+        throw new java.io.IOException("");
     }
 
     /**
