@@ -112,11 +112,17 @@ public final class BhVjoyShareHook {
         //   - pre28b (this): throw → clean failure, no publish, no
         //     dialog, no navigation, temp file cleaned up by the host.
         if (dto == null) return null; // resume/edge — let host proceed
-        // Empty message: the host's catch formats a "Share failed: %1$s"
-        // toast using e.getMessage(). We override that resource string to ""
-        // via the Lxd3;->l1 resolver so the toast collapses to empty; the
-        // empty message here is belt-and-braces if that override ever misses.
-        throw new java.io.IOException("");
+        // Throw CancellationException (not IOException). The host's outer
+        // catch fetches its "Share failed: %1$s" toast string via a non-
+        // Compose resource path that bypasses our Lxd3;->l1 override, so
+        // suppressing the toast at the resource level doesn't work. But
+        // standard Kotlin practice for suspend code is
+        //   catch (e: CancellationException) { throw e } catch (e: Exception) { toast(...) }
+        // — if the host follows that pattern, CE re-propagates silently
+        // and the toast never fires. The cloud publish is still aborted
+        // (Lnrn;->h's catchall_b4 deletes the temp file and re-throws
+        // regardless of the exception type).
+        throw new java.util.concurrent.CancellationException();
     }
 
     /**
