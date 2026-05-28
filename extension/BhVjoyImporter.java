@@ -191,6 +191,17 @@ public final class BhVjoyImporter {
                     .build();
             db = android.database.sqlite.SQLiteDatabase.openDatabase(dbFile, params);
 
+            // Detect the logged-in user's id from the host's own existing rows
+            // (upstream hardcoded "99999" — a sentinel from their guest test
+            // session — but My Layouts filters by the real account id, so a
+            // hardcoded value renders the imported row invisible to a logged-in
+            // user). Diagnostic-log the distribution + retroactively re-stamp
+            // any orphaned rows we ourselves inserted with the sentinel.
+            String userId = pickUserIdFor(db);
+            logUserIdDistribution(db);
+            Log.i(TAG, "user_id chosen for import: " + userId);
+            repairOrphanedImports(db, userId);
+
             // Pull values for the row.
             long now = System.currentTimeMillis();
             String name = readLayoutName(layout);
@@ -199,7 +210,7 @@ public final class BhVjoyImporter {
             String configHash = readReceiptString(saveReceipt, "getConfigHash");
 
             android.content.ContentValues v = new android.content.ContentValues();
-            v.put("user_id",              "99999");
+            v.put("user_id",              userId);
             v.put("folder_key",           layoutId);
             v.put("folder_path",          "vjoy_layouts/" + layoutId + "/");
             v.put("title_i18n_json",      titleI18n);
@@ -243,6 +254,72 @@ public final class BhVjoyImporter {
             return false;
         } finally {
             if (db != null) try { db.close(); } catch (Throwable ignored) { }
+        }
+    }
+
+    /**
+     * Pick a user_id for our INSERT. Strategy: take the most recent
+     * non-deleted row's user_id — that's the value the host's own Create
+     * flow uses, which is also what My Layouts filters by. Falls back to
+     * "99999" (upstream's sentinel) only if the table is empty.
+     */
+    private static String pickUserIdFor(android.database.sqlite.SQLiteDatabase db) {
+        try (android.database.Cursor c = db.rawQuery(
+                "SELECT user_id FROM virtual_key_layout "
+                + "WHERE deleted_at IS NULL AND user_id IS NOT NULL "
+                + "AND user_id != '' "
+                + "ORDER BY created_at DESC LIMIT 1", null)) {
+            if (c != null && c.moveToFirst()) {
+                String id = c.getString(0);
+                if (id != null && !id.isEmpty()) return id;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "pickUserIdFor failed", t);
+        }
+        return "99999";
+    }
+
+    /** Diagnostic: log (user_id, count) groupings for virtual_key_layout. */
+    private static void logUserIdDistribution(android.database.sqlite.SQLiteDatabase db) {
+        try (android.database.Cursor c = db.rawQuery(
+                "SELECT user_id, COUNT(*) FROM virtual_key_layout "
+                + "GROUP BY user_id ORDER BY COUNT(*) DESC", null)) {
+            StringBuilder sb = new StringBuilder("user_id distribution:");
+            if (c != null) {
+                while (c.moveToNext()) {
+                    sb.append(' ').append(c.getString(0)).append('=')
+                      .append(c.getLong(1));
+                }
+            }
+            Log.i(TAG, sb.toString());
+        } catch (Throwable t) {
+            Log.w(TAG, "logUserIdDistribution failed", t);
+        }
+    }
+
+    /**
+     * Re-stamp any rows we previously inserted under the "99999" sentinel
+     * (orphaned because they don't match the logged-in user's id). Only
+     * touches rows that match our own source_key marker ("local:%") so we
+     * never overwrite a host-created row whose user_id legitimately is 99999.
+     */
+    private static void repairOrphanedImports(
+            android.database.sqlite.SQLiteDatabase db, String correctUserId) {
+        if (correctUserId == null || "99999".equals(correctUserId)) return;
+        try {
+            android.content.ContentValues v = new android.content.ContentValues();
+            v.put("user_id", correctUserId);
+            int n = db.update(
+                "virtual_key_layout",
+                v,
+                "user_id = ? AND source_key LIKE 'local:%'",
+                new String[]{ "99999" });
+            if (n > 0) {
+                Log.i(TAG, "repaired " + n + " orphaned import row(s): "
+                    + "user_id 99999 -> " + correctUserId);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "repairOrphanedImports failed", t);
         }
     }
 
