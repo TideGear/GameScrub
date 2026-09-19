@@ -97,7 +97,7 @@ from pathlib import Path
 # plugin host activity and the same smali layout. apktool.yml carries the
 # actual versionName, so report that and keep the probes for the *family*
 # decision (plugin-era vs base-APK-engine).
-SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1")
+SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1", "6.3.0")
 
 
 def apktool_version(root: Path):
@@ -161,19 +161,41 @@ def die(msg):
 # Same probe pair as the sibling scripts: the app class (which moved to
 # smali_classes2 in 6.1.1) plus the PC-engine plugin host activity, which only
 # exists from 6.1.1.
-VERSION_PROBES = {
-    "6.1.1": (
-        "smali_classes2/com/xiaoji/egggame/AndroidApp.smali",
-        "smali/com/xiaoji/egggame/plugin/pcengine/host/PcEnginePluginHostActivity.smali",
-    ),
-}
+# --- Bucket-agnostic locations for classes that keep their real names -------
+# R8 shuffles which dex bucket a class lands in on nearly every build, and 6.3.0
+# went from 4 dex to 5, moving AndroidApp smali_classes2 -> smali_classes3. These
+# two keep their real package names, so discover the bucket instead of pinning
+# it; a hardcoded path here fails the VERSION PROBE, which made all four scripts
+# report "could not detect GameHub version" rather than naming the real problem.
+ANDROID_APP_REL = "com/xiaoji/egggame/AndroidApp.smali"
+PLUGIN_HOST_REL = ("com/xiaoji/egggame/plugin/pcengine/host/"
+                   "PcEnginePluginHostActivity.smali")
+
+
+def find_in_any_bucket(root: Path, rel: str):
+    """The one smali*/<rel>, or None."""
+    hits = sorted(Path(root).glob(f"smali*/{rel}"))
+    return hits[0] if len(hits) == 1 else None
+
+
+def android_app_smali(root: Path) -> Path:
+    p = find_in_any_bucket(root, ANDROID_APP_REL)
+    if p is None:
+        print(f"ERROR: {ANDROID_APP_REL} not found in any smali* bucket - the "
+              f"Application class moved or was renamed; re-anchor.",
+              file=sys.stderr)
+        sys.exit(1)
+    return p
+
+
+VERSION_PROBES = {"6.1.1": (ANDROID_APP_REL, PLUGIN_HOST_REL)}
 
 
 def detect_version(root: Path) -> str:
     matches = [
         ver
         for ver, probes in VERSION_PROBES.items()
-        if all((root / p).is_file() for p in probes)
+        if all(find_in_any_bucket(root, p) for p in probes)
     ]
     if not matches:
         die("could not detect GameHub version — none of the known smali "

@@ -57,7 +57,7 @@ from pathlib import Path
 # plugin host activity and the same smali layout. apktool.yml carries the
 # actual versionName, so report that and keep the probes for the *family*
 # decision (plugin-era vs base-APK-engine).
-SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1")
+SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1", "6.3.0")
 
 
 def apktool_version(root: Path):
@@ -100,23 +100,44 @@ def write_lf(path: Path, content: str) -> None:
         f.write(content)
 
 
+# --- Bucket-agnostic locations for classes that keep their real names -------
+# R8 shuffles dex buckets on nearly every build, and 6.3.0 went from 4 dex to 5,
+# moving AndroidApp smali_classes2 -> smali_classes3. These keep their real
+# package names, so discover the bucket rather than pinning it.
+ANDROID_APP_REL = "com/xiaoji/egggame/AndroidApp.smali"
+PLUGIN_HOST_REL = ("com/xiaoji/egggame/plugin/pcengine/host/"
+                   "PcEnginePluginHostActivity.smali")
+
+
+def find_in_any_bucket(root: Path, rel: str):
+    """The one smali*/<rel>, or None."""
+    hits = sorted(Path(root).glob(f"smali*/{rel}"))
+    return hits[0] if len(hits) == 1 else None
+
+
+def android_app_smali(root: Path) -> Path:
+    p = find_in_any_bucket(root, ANDROID_APP_REL)
+    if p is None:
+        print(f"ERROR: {ANDROID_APP_REL} not found in any smali* bucket - the "
+              f"Application class moved or was renamed; re-anchor.",
+              file=sys.stderr)
+        sys.exit(1)
+    return p
+
+
+
 # ---------------------------------------------------------------------------
 # Version detection (mirrors apply_menu_patches.py)
 # ---------------------------------------------------------------------------
 
-VERSION_PROBES = {
-    "6.1.1": (
-        "smali_classes2/com/xiaoji/egggame/AndroidApp.smali",
-        "smali/com/xiaoji/egggame/plugin/pcengine/host/PcEnginePluginHostActivity.smali",
-    ),
-}
+VERSION_PROBES = {"6.1.1": (ANDROID_APP_REL, PLUGIN_HOST_REL)}
 
 
 def detect_version(root: Path) -> str:
     matches = [
         ver
         for ver, probes in VERSION_PROBES.items()
-        if all((root / p).is_file() for p in probes)
+        if all(find_in_any_bucket(root, p) for p in probes)
     ]
     if not matches:
         print(
@@ -131,8 +152,6 @@ def detect_version(root: Path) -> str:
 # ---------------------------------------------------------------------------
 # App-start hook
 # ---------------------------------------------------------------------------
-
-ANDROID_APP_SMALI = "smali_classes2/com/xiaoji/egggame/AndroidApp.smali"
 
 # The line stock onCreate() runs right after super.onCreate(); the register it
 # stores is the Application. Holder class + field name are R8 letters (wildcarded,
@@ -158,10 +177,7 @@ def start_call(reg: str) -> str:
 
 
 def patch_app_start(root: Path) -> None:
-    p = root / ANDROID_APP_SMALI
-    if not p.is_file():
-        print(f"ERROR: {ANDROID_APP_SMALI} not found", file=sys.stderr)
-        sys.exit(1)
+    p = android_app_smali(root)
     src = read(p)
 
     if "Lcom/xj/winemu/update/BhSteamUpdateChecker;->start(" in src:

@@ -4,17 +4,17 @@ name: Build APK
 # bannerhub-revanced's privacy patch set. Adds dual-motor low/high
 # dispatch + preload-free SDL rumble keepalive (winebus.so duration
 # patched on disk) and kills Firebase / GMS Measurement / Mob Push /
-# XiaoJi heartbeat+events / JieLi OTA on top of stock GameHub 6.2.1.
+# XiaoJi heartbeat+events / JieLi OTA on top of stock GameHub 6.3.0.
 # Otherwise unchanged from upstream Tencent build.
 #
 # One-time setup: upload the original GameHub APK as an asset on a
-# release tagged `base-apk-6.2.1` in this repo. The workflow
+# release tagged `base-apk-6.3.0` in this repo. The workflow
 # `gh release download`s from there.
 
 on:
   push:
     tags:
-      - 'v*-6.2.1*'
+      - 'v*-6.3.0*'
   workflow_dispatch:
 
 jobs:
@@ -30,10 +30,10 @@ jobs:
       - name: Resolve base version
         id: base
         run: |
-          # Only 6.2.1 is supported. Kept as a step so downstream steps can
+          # Only 6.3.0 is supported. Kept as a step so downstream steps can
           # still reference steps.base.outputs.* without restructuring.
-          echo "version=6.2.1" >> "$GITHUB_OUTPUT"
-          echo "release_tag=base-apk-6.2.1" >> "$GITHUB_OUTPUT"
+          echo "version=6.3.0" >> "$GITHUB_OUTPUT"
+          echo "release_tag=base-apk-6.3.0" >> "$GITHUB_OUTPUT"
           # The PC engine is a separately-downloaded plugin from 6.1.1 on, and
           # the dual-motor rumble hooks live inside it. Upload the plugin APK
           # (pulled from a device: files/plugins/com.xiaoji.egggame.plugin.pcengine/
@@ -41,17 +41,24 @@ jobs:
           # extension/BhPluginShadow.java#EXPECTED_PLUGIN_VERSION_CODE.
           #
           # The plugin contract has bumped on EVERY base: schemaVersion 2 (6.1.1),
-          # 3 (6.1.2), 4 (6.2.0), 5 (6.2.1). An older plugin is rejected outright.
+          # 3 (6.1.2), 4 (6.2.0), 5 (6.2.1), 6 (6.3.0). An older plugin is
+          # rejected outright.
           #
-          # 6.2.1's schema-5 plugin is 104 (versionName 104-5).
+          # PROVISIONAL: 6.3.0 wants a schema-6 plugin, which does not exist until
+          # a device downloads one. The code has gone +1 per base (101/102/103/104),
+          # so 105 is the expectation — but it is a GUESS until the plugin is pulled
+          # off a device and published on this tag. If the tag does not exist the
+          # download step warns and the build proceeds base-only, which is the
+          # correct failure mode: no dual-motor, no plugin-side privacy kills, and
+          # it says so rather than shipping a shadow cut against the wrong plugin.
           #
           # Since the runtime compat probe landed, a mismatch here is no longer
           # automatically fatal: if a newer plugin leaves the four shadowed classes
           # structurally identical, BhPluginShadow verifies that at load time and
           # shadows anyway. It still pays to keep this current, because a plugin
           # that DOES change them (as 103 -> 104 did) is correctly refused.
-          echo "plugin_tag=pcengine-plugin-104" >> "$GITHUB_OUTPUT"
-          echo "Base version: 6.2.1"
+          echo "plugin_tag=pcengine-plugin-105" >> "$GITHUB_OUTPUT"
+          echo "Base version: 6.3.0"
 
       - name: Download original GameHub APK
         run: |

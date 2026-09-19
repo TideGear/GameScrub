@@ -150,7 +150,7 @@ from pathlib import Path
 # plugin host activity and the same smali layout. apktool.yml carries the
 # actual versionName, so report that and keep the probes for the *family*
 # decision (plugin-era vs base-APK-engine).
-SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1")
+SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1", "6.3.0")
 
 
 def apktool_version(root: Path):
@@ -450,21 +450,39 @@ def write(path, content):
 # Same probe pair as the sibling scripts: the app class (which moved to
 # smali_classes2 in 6.1.1) plus the PC-engine plugin host activity, which only
 # exists from 6.1.1.
-ANDROID_APP_SMALI = "smali_classes2/com/xiaoji/egggame/AndroidApp.smali"
+# --- Bucket-agnostic locations for classes that keep their real names -------
+# R8 shuffles dex buckets on nearly every build, and 6.3.0 went from 4 dex to 5,
+# moving AndroidApp smali_classes2 -> smali_classes3. These keep their real
+# package names, so discover the bucket rather than pinning it.
+ANDROID_APP_REL = "com/xiaoji/egggame/AndroidApp.smali"
+PLUGIN_HOST_REL = ("com/xiaoji/egggame/plugin/pcengine/host/"
+                   "PcEnginePluginHostActivity.smali")
 
-VERSION_PROBES = {
-    "6.1.1": (
-        ANDROID_APP_SMALI,
-        "smali/com/xiaoji/egggame/plugin/pcengine/host/PcEnginePluginHostActivity.smali",
-    ),
-}
+
+def find_in_any_bucket(root: Path, rel: str):
+    """The one smali*/<rel>, or None."""
+    hits = sorted(Path(root).glob(f"smali*/{rel}"))
+    return hits[0] if len(hits) == 1 else None
+
+
+def android_app_smali(root: Path) -> Path:
+    p = find_in_any_bucket(root, ANDROID_APP_REL)
+    if p is None:
+        print(f"ERROR: {ANDROID_APP_REL} not found in any smali* bucket - the "
+              f"Application class moved or was renamed; re-anchor.",
+              file=sys.stderr)
+        sys.exit(1)
+    return p
+
+
+VERSION_PROBES = {"6.1.1": (ANDROID_APP_REL, PLUGIN_HOST_REL)}
 
 
 def detect_version(root: Path) -> str:
     matches = [
         ver
         for ver, probes in VERSION_PROBES.items()
-        if all((root / p).is_file() for p in probes)
+        if all(find_in_any_bucket(root, p) for p in probes)
     ]
     if not matches:
         print(
@@ -1156,7 +1174,7 @@ def patch_mob_bytecode(root: Path) -> None:
     # BaseAndroidApp.a() on 6.0.4. Located by the SDK call it makes rather than
     # by the letter, since both invokes we strip live in the same method.
     mob_bootstrap = locate_method_containing(
-        root / ANDROID_APP_SMALI,
+        android_app_smali(root),
         "Lcom/mob/MobSDK;->submitPolicyGrantResult(Z)V",
         "Mob bootstrap",
     )
@@ -1164,7 +1182,7 @@ def patch_mob_bytecode(root: Path) -> None:
     # First policy-grant invoke. The `const/4 v2, 0x1` that sets up the call's
     # arg stays — later code in the method uses it too.
     remove_invoke_in_method(
-        root / ANDROID_APP_SMALI,
+        android_app_smali(root),
         mob_bootstrap,
         "Lcom/mob/MobSDK;->submitPolicyGrantResult(Z)V",
         "strip MobSDK.submitPolicyGrantResult",
@@ -1175,7 +1193,7 @@ def patch_mob_bytecode(root: Path) -> None:
     # move-result, and strictly interior (the try-boundary labels are not
     # adjacent), so removal is label-safe.
     remove_invoke_in_method(
-        root / ANDROID_APP_SMALI,
+        android_app_smali(root),
         mob_bootstrap,
         "Lcom/mob/pushsdk/MobPush;->addPushReceiverInMain",
         "strip MobPush.addPushReceiverInMain",
@@ -1230,7 +1248,7 @@ def patch_firebase_autoinit(root: Path) -> None:
     from the unique "firebase_data_collection_default_enabled" string literal in
     the same method, so the R8 letter is read out of the code rather than
     hardcoded — the literal is the SDK's own preference key and is stable."""
-    p = root / ANDROID_APP_SMALI
+    p = android_app_smali(root)
     src = read(p)
     # The bootstrap method's own name is an R8 letter that moves every release
     # (6.0.9 a(), 6.1.1 b(), 6.1.2 a() — and 6.1.2's b() is the *Mob* bootstrap,
