@@ -10,7 +10,7 @@ It is built on GameHub v6.x and heavily uses the work of
 [@The412Banner](https://github.com/The412Banner) as well as others. It
 also includes my own PC-accurate controller vibration fixes.
 
-> ### 6.3.0 — base half ported; plugin half awaiting the schema-6 plugin
+> ### 6.3.0 — everything working, pinned to PC-engine plugin 106
 >
 > GameHub **6.1.1 moved the PC/Wine engine out of the APK** into a
 > separately-downloaded plugin, which splits the vibration work in two. GameScrub
@@ -20,24 +20,19 @@ also includes my own PC-accurate controller vibration fixes.
 >
 > **The plugin contract has bumped on every base**: `schemaVersion` 2 (6.1.1), 3
 > (6.1.2), 4 (6.2.0), 5 (6.2.1), **6 (6.3.0)**. The host refuses anything else
-> outright and downloads a replacement.
+> outright and downloads a replacement. The shadow is cut against **plugin 106**
+> (`versionName 106-6`), verified on device: `dual-motor ACTIVE — shadowing PC
+> engine plugin v106`, with **zero** `heartbeat/game` POSTs, **zero** `/events`
+> POSTs and `uploadedBatches=0 sessionIds=[]` for the device-perf telemetry.
 >
-> **What is done on 6.3.0:** the whole base-APK half — privacy kills, menu rows,
-> VJoy import/export, the Steam update-badge sweep and the winebus sustained-rumble
-> trigger. All six base scripts resolve structurally and the APK builds and signs.
->
-> **What is not done yet:** 6.3.0 wants a **schemaVersion 6** plugin, which does
-> not exist until a device downloads one. Until that plugin is extracted and the
-> shadow is re-cut against it, a 6.3.0 build ships **without** dual-motor rumble
-> and **without** the plugin-side privacy stubs (playtime heartbeat, device-perf
-> telemetry). Sustained rumble is unaffected — that is a winebus patch on the Wine
-> component tree, not the plugin.
->
-> The last fully-verified base is **6.2.1 / plugin 104** (`versionName 104-5`):
-> `dual-motor ACTIVE — shadowing PC engine plugin v104`, plus a real 62 s session
-> with **zero** `heartbeat/game` POSTs and `uploadedBatches=0` for the device-perf
-> telemetry (the summary is still computed locally — 5 samples, 58 fps — it just
-> never leaves the device).
+> That verification is an unusually clean A/B, because the same device ran the
+> same plugin 106 **unshadowed** earlier the same day (the base-only build made
+> before the plugin existed). That session uploaded a full
+> `device_perf_session_summary` batch — `user_id`, `game_id`, session duration,
+> fps/power/RAM/GPU/CPU/temperature averages and the complete container config —
+> plus 12 `heartbeat/game` POSTs. Shadowed, all three channels go to zero while
+> the local bookkeeping keeps running, which is the intended shape: the summary is
+> still computed on-device, it just never leaves.
 >
 > **A stale shadow is no longer automatically fatal.** Since the runtime
 > compatibility probe landed, a plugin that does not match

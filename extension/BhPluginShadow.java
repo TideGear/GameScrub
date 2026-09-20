@@ -103,7 +103,7 @@ public final class BhPluginShadow {
      * next, which is the safe direction — but it is why a fresh install shows
      * "updated to v?" once before settling.
      */
-    private static final long EXPECTED_PLUGIN_VERSION_CODE = 104L;
+    private static final long EXPECTED_PLUGIN_VERSION_CODE = 106L;
 
     /** Written into the APK's assets/ by the build. */
     private static final String SHADOW_ASSET = "bh_pcengine_shadow.dex";
