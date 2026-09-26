@@ -10,7 +10,7 @@ It is built on GameHub v6.x and heavily uses the work of
 [@The412Banner](https://github.com/The412Banner) as well as others. It
 also includes my own PC-accurate controller vibration fixes.
 
-> ### 6.3.1 — dual-motor confirmed on device, pinned to PC-engine plugin 107
+> ### 6.3.1 — everything working, pinned to PC-engine plugin 107
 >
 > GameHub **6.1.1 moved the PC/Wine engine out of the APK** into a
 > separately-downloaded plugin, which splits the vibration work in two. GameScrub
@@ -24,37 +24,26 @@ also includes my own PC-accurate controller vibration fixes.
 > **plugin 107** (`versionName 107-7`), pulled off a device and byte-exact against
 > the host's own identity record.
 >
-> **Status of the 6.3.1 verification — read this.** Every patch site resolved
-> structurally and all four shadow classes are present. **Dual-motor rumble is
-> confirmed by hand on device with plugin 107.** That also shows the shadow dex
-> loaded: dual-motor has no other path. The heartbeat and device-perf stubs ship
-> in that same dex, so they were loaded too.
+> **Verified on device:** `dual-motor ACTIVE — shadowing PC engine plugin v107`,
+> dual-motor rumble confirmed by hand, **zero** `heartbeat/game` traffic and
+> `uploadedBatches=0 sessionIds=[]` for the device-perf telemetry.
 >
-> What has **not** been observed yet is the traffic itself. Nobody has checked a
-> session log for zero `heartbeat/game` POSTs and `uploadedBatches=0`. Treat the
-> privacy kills on 6.3.1 as loaded but not yet observed.
+> Like the last two bases, this is a real A/B. The same device ran the same plugin
+> 107 **unshadowed** at 22:23, on the base-only build made before the plugin
+> existed. That session produced `heartbeat/game` traffic every minute for five
+> minutes and uploaded a `device_perf_session_summary` batch tagged with the
+> account's `user_id`. The shadowed sessions afterwards (22:42 and 22:57) produced
+> none of either. They were not idle: the playtime tracker started its timer and
+> the perf reporter captured 18 samples, so both channels were running and the
+> stubs caught them. The summary is still computed on-device, it just never leaves.
 >
-> One reason to take that caveat seriously: 6.3.1 is the first bump where a
-> **privacy** locator broke. Plugin 107 renamed the device-perf upload method and
-> added an unrelated sibling, so the old letter-pinned locator found nothing. The
-> shadow builder's four-class tripwire refused to build without the stub, which is
-> what it is for — otherwise this build would have shipped the telemetry live and
-> reported success. The locator is now structural and regression-tested against
-> both 106 and 107.
->
-> The last base verified end-to-end on device is **6.3.0 / plugin 106**:
-> `dual-motor ACTIVE — shadowing PC engine plugin v106`, with **zero**
-> `heartbeat/game` POSTs, **zero** `/events` POSTs and `uploadedBatches=0
-> sessionIds=[]` for the device-perf telemetry.
->
-> That 6.3.0 verification was an unusually clean A/B, because the same device ran
-> the same plugin 106 **unshadowed** earlier the same day (the base-only build made
-> before the plugin existed). That session uploaded a full
-> `device_perf_session_summary` batch — `user_id`, `game_id`, session duration,
-> fps/power/RAM/GPU/CPU/temperature averages and the complete container config —
-> plus 12 `heartbeat/game` POSTs. Shadowed, all three channels go to zero while
-> the local bookkeeping keeps running, which is the intended shape: the summary is
-> still computed on-device, it just never leaves.
+> Worth knowing: 6.3.1 is the first bump where a **privacy** locator broke. Plugin
+> 107 renamed the device-perf upload method and added an unrelated sibling, so the
+> old letter-pinned locator found nothing. The shadow builder's four-class tripwire
+> refused to build without the stub, which is what it is for. Otherwise this build
+> would have shipped the telemetry live and reported success. The locator is now
+> structural, regression-tested against both 106 and 107, and the zero above is
+> that rewritten stub working.
 >
 > **A stale shadow is no longer automatically fatal.** Since the runtime
 > compatibility probe landed, a plugin that does not match
