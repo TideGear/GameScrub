@@ -163,16 +163,33 @@ from pathlib import Path
 # to REAL classes in 102 — 102's mv1 is the "upload success" log lambda and its
 # jv1 has an entirely different constructor. So nothing here is pinned by name.
 #
-# The uploader is identified by its method pair: the batch upload c(J, Cont) plus
-# the bootstrap/retry sibling b(I, J, Cont). Unique in both 101 and 102.
-UPLOADER_METHOD = (
-    ".method public final c(JLkotlin/coroutines/jvm/internal/ContinuationImpl;)"
-    "Ljava/lang/Object;\n"
-)
-UPLOADER_SIBLING = (
-    ".method public final b(IJLkotlin/coroutines/jvm/internal/ContinuationImpl;)"
-    "Ljava/lang/Object;\n"
-)
+# The uploader is located STRUCTURALLY, not by method letter. Plugins 101-106
+# kept the pair as c(J…) upload + b(IJ…) retry, and pinning those two letters
+# worked right up until plugin 107 renamed them to d(J…) + c(IJ…) and added an
+# unrelated a(J…) (a read-only "load pending summaries" step under a timeout).
+# A letter pin fails loudly at best; at worst a later shuffle lands the old
+# letter on the wrong method of the same class.
+#
+# What has held across every plugin since 101:
+#   * the upload is a `public final <x>(J…ContinuationImpl;)Object` method,
+#   * the retry wrapper is a `public final <y>(IJ…ContinuationImpl;)Object`
+#     method whose body calls <x> ON ITS OWN CLASS, and
+#   * the class holds a field typed as the local summary repository (the class
+#     carrying both "device_perf_session_summary_v1" and "readSummaryLocked").
+# The retry -> upload self-call is what picks <x> out of several (J…) methods,
+# and the repository field is what pins the class.
+UPLOAD_J_RE = re.compile(
+    r"^\.method public final (\w+)\(JLkotlin/coroutines/jvm/internal/"
+    r"ContinuationImpl;\)Ljava/lang/Object;\n", re.M)
+RETRY_IJ_RE = re.compile(
+    r"^\.method public final (\w+)\(IJLkotlin/coroutines/jvm/internal/"
+    r"ContinuationImpl;\)Ljava/lang/Object;\n", re.M)
+REPO_MARKERS = ("device_perf_session_summary_v1", "readSummaryLocked")
+
+
+def upload_header(name: str) -> str:
+    return (f".method public final {name}(JLkotlin/coroutines/jvm/internal/"
+            "ContinuationImpl;)Ljava/lang/Object;\n")
 
 # The "nothing uploaded" result is whatever the uploader itself builds with a
 # no-arg ctor on its empty-batch / missing-summary / failure paths. Deriving it
@@ -364,21 +381,49 @@ def stub_method(root: Path, rel: str, header: str, stub: str, what: str,
     print(f"OK: {ok_msg}")
 
 
-def locate_uploader(root: Path) -> str:
-    """Relative path of the perf uploader, found by its method pair."""
+def locate_uploader(root: Path):
+    """(relative path, upload-method header) of the perf uploader, found
+    structurally — see UPLOAD_J_RE for why not by letter."""
+    # list(): smali_files() is a generator and this walks the tree twice.
+    files = list(smali_files(root))
+
+    def type_of(path: Path) -> str:
+        rel = path.relative_to(root).as_posix()
+        return "L" + rel[len("smali/"):-len(".smali")] + ";"
+
+    repos = [type_of(p) for p in files
+             if all(m in read(p) for m in REPO_MARKERS)]
+    if len(repos) != 1:
+        die(f"expected exactly one device-perf summary repository (a class "
+            f"carrying {REPO_MARKERS}), found {len(repos)}: {repos}")
+    repo = repos[0]
+    print(f"    summary repository: {repo}")
+    repo_field = re.compile(rf"^\.field [^\n]*:{re.escape(repo)}$", re.M)
+
     hits = []
-    for path in smali_files(root):
+    for path in files:
         text = read(path)
-        if UPLOADER_METHOD in text and UPLOADER_SIBLING in text:
-            hits.append(path.relative_to(root).as_posix())
+        if not repo_field.search(text):
+            continue
+        self_t = type_of(path)
+        uploads = set(UPLOAD_J_RE.findall(text))
+        for retry in RETRY_IJ_RE.finditer(text):
+            body = text[retry.start():text.find("\n.end method", retry.start())]
+            for up in uploads:
+                if (f"{self_t}->{up}(JLkotlin/coroutines/jvm/internal/"
+                        "ContinuationImpl;)") in body:
+                    hits.append((path.relative_to(root).as_posix(), up,
+                                 retry.group(1)))
     if not hits:
-        die("perf uploader not found — no class declares both\n"
-            f"  {UPLOADER_METHOD.strip()}\n  {UPLOADER_SIBLING.strip()}\n"
-            "  (re-anchor; the upload/retry method pair changed shape.)")
+        die("perf uploader not found — no class holding the summary repository "
+            f"{repo} has an (IJ…) retry method calling one of its own (J…) "
+            "methods. Re-anchor by hand from the 'DevicePerfSessionSummaryUploader "
+            "upload start' log lambda: the method that builds it is the upload.")
     if len(hits) > 1:
         die(f"perf uploader shape is non-unique ({len(hits)}): {hits}")
-    print(f"    perf uploader: {hits[0]}")
-    return hits[0]
+    rel, up, retry = hits[0]
+    print(f"    perf uploader: {rel}  (upload {up}(J…), retry {retry}(IJ…))")
+    return rel, upload_header(up)
 
 
 def derive_nothing_uploaded(root: Path, rel: str, header: str) -> str:
@@ -421,10 +466,10 @@ def patch_perf_uploader(root: Path) -> None:
     # result type it builds on its bail-out paths. (An earlier version looked for
     # the log string in this file and correctly refused to patch — keep the
     # signal on real instructions.)
-    rel = locate_uploader(root)
-    result_type = derive_nothing_uploaded(root, rel, UPLOADER_METHOD)
+    rel, header = locate_uploader(root)
+    result_type = derive_nothing_uploaded(root, rel, header)
     stub_method(
-        root, rel, UPLOADER_METHOD, uploader_stub(result_type),
+        root, rel, header, uploader_stub(result_type),
         f"perf uploader {rel}",
         [(f"{result_type}-><init>()V",
           "returning this type is only safe if the method's own bail-out paths "

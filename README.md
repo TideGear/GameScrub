@@ -10,7 +10,7 @@ It is built on GameHub v6.x and heavily uses the work of
 [@The412Banner](https://github.com/The412Banner) as well as others. It
 also includes my own PC-accurate controller vibration fixes.
 
-> ### 6.3.0 — everything working, pinned to PC-engine plugin 106
+> ### 6.3.1 — built and structurally verified, pinned to PC-engine plugin 107
 >
 > GameHub **6.1.1 moved the PC/Wine engine out of the APK** into a
 > separately-downloaded plugin, which splits the vibration work in two. GameScrub
@@ -19,14 +19,34 @@ also includes my own PC-accurate controller vibration fixes.
 > [PC engine plugin](#pc-engine-plugin-611).
 >
 > **The plugin contract has bumped on every base**: `schemaVersion` 2 (6.1.1), 3
-> (6.1.2), 4 (6.2.0), 5 (6.2.1), **6 (6.3.0)**. The host refuses anything else
-> outright and downloads a replacement. The shadow is cut against **plugin 106**
-> (`versionName 106-6`), verified on device: `dual-motor ACTIVE — shadowing PC
-> engine plugin v106`, with **zero** `heartbeat/game` POSTs, **zero** `/events`
-> POSTs and `uploadedBatches=0 sessionIds=[]` for the device-perf telemetry.
+> (6.1.2), 4 (6.2.0), 5 (6.2.1), 6 (6.3.0), **7 (6.3.1)**. The host refuses
+> anything else outright and downloads a replacement. The shadow is cut against
+> **plugin 107** (`versionName 107-7`), pulled off a device and byte-exact against
+> the host's own identity record.
 >
-> That verification is an unusually clean A/B, because the same device ran the
-> same plugin 106 **unshadowed** earlier the same day (the base-only build made
+> **Status of the 6.3.1 verification — read this.** Every patch site resolved
+> structurally, the build installs and runs, and all four shadow classes are
+> present. What has **not** yet been confirmed on a device is the runtime result
+> for plugin 107: the `dual-motor ACTIVE — shadowing PC engine plugin v107` log
+> line, felt dual-motor rumble, and zero heartbeat / device-perf traffic in a
+> real session. Until that is checked, treat those three as expected rather than
+> proven.
+>
+> One reason to take that caveat seriously: 6.3.1 is the first bump where a
+> **privacy** locator broke. Plugin 107 renamed the device-perf upload method and
+> added an unrelated sibling, so the old letter-pinned locator found nothing. The
+> shadow builder's four-class tripwire refused to build without the stub, which is
+> what it is for — otherwise this build would have shipped the telemetry live and
+> reported success. The locator is now structural and regression-tested against
+> both 106 and 107.
+>
+> The last base verified end-to-end on device is **6.3.0 / plugin 106**:
+> `dual-motor ACTIVE — shadowing PC engine plugin v106`, with **zero**
+> `heartbeat/game` POSTs, **zero** `/events` POSTs and `uploadedBatches=0
+> sessionIds=[]` for the device-perf telemetry.
+>
+> That 6.3.0 verification was an unusually clean A/B, because the same device ran
+> the same plugin 106 **unshadowed** earlier the same day (the base-only build made
 > before the plugin existed). That session uploaded a full
 > `device_perf_session_summary` batch — `user_id`, `game_id`, session duration,
 > fps/power/RAM/GPU/CPU/temperature averages and the complete container config —
@@ -146,7 +166,7 @@ key, so a patched plugin can be re-validated by recomputing that record.
 
 **On-device layout.** Confirmed from the app's own logs under
 `/sdcard/Android/data/com.xiaoji.egggame/files/logs/` (paths verified on both
-6.1.1/plugin 101, 6.1.2/plugin 102, 6.2.0/plugin 103 and 6.2.1/plugin 104):
+6.1.1/plugin 101 through 6.3.1/plugin 107):
 
 ```
 files/plugins/com.xiaoji.egggame.plugin.pcengine/base.apk        the plugin (v103, ~24.1 MB)
@@ -202,7 +222,7 @@ Wine.
 
 `BhPluginShadow` therefore gates on the installed plugin's `versionCode` (read
 from the host's own identity record) matching
-`EXPECTED_PLUGIN_VERSION_CODE` (104 for the 6.2.1-era plugin). On a mismatch it
+`EXPECTED_PLUGIN_VERSION_CODE` (107 for the 6.3.1-era plugin). On a mismatch it
 returns the dexPath unchanged:
 dual-motor turns **off**, the engine keeps working. Degraded, never broken.
 
@@ -517,11 +537,11 @@ if any anchor is missing or non-unique.
 ## Build
 
 CI workflow: `.github/workflows/build.yml` — triggers on `workflow_dispatch`
-or push of a `v*-6.3.0*` tag.
+or push of a `v*-6.3.1*` tag.
 
 One-time setup: upload the original GameHub APK as an asset on a release
-tagged `base-apk-6.3.0` in this repo (e.g.
-`GameHub_6.3.0_3712188e4ddd3358328f9b469bca2b83.apk`). The workflow
+tagged `base-apk-6.3.1` in this repo (e.g.
+`GameHub_6.3.1_0aca596ab937fcb1449dbb7d5700db83.apk`). The workflow
 `gh release download`s from there.
 
 `scripts/apply_vibration_patches.py` **is** run on 6.1.1, but does less than it

@@ -157,9 +157,9 @@ public final class BhMenuRowClick {
     // `public synthetic`,
     // so a pattern requiring `public constructor` silently misses it.
     // ─────────────────────────────────────────────────────────────────────
-    private static final String ROW_MORE_MENU  = "slm";   // 6.2.1 kji, 6.2.0 zii
-    private static final String ROW_TILE_POPUP = "dik";   // 6.2.1 fpg, 6.2.0 uog
-    private static final String ROW_THREE_DOT  = "dwl";   // 6.2.1 oyh, 6.2.0 dyh
+    private static final String ROW_MORE_MENU  = "cpm";   // 6.3.0 slm, 6.2.1 kji
+    private static final String ROW_TILE_POPUP = "blk";   // 6.3.0 dik, 6.2.1 fpg
+    private static final String ROW_THREE_DOT  = "dzl";   // 6.3.0 dwl, 6.2.1 oyh
 
     private static final String FUNCTION0 = "kotlin.jvm.functions.Function0";
     private static final String FUNCTION1 = "kotlin.jvm.functions.Function1";
@@ -171,7 +171,7 @@ public final class BhMenuRowClick {
     // because it is CMP-internal (6.1.1 "ull", 6.0.9 "o4h", 6.0.4 "tdi").
     // Re-derive by reading StringResource's superclass out of the tree:
     //   grep '^\.super' smali*/org/jetbrains/compose/resources/StringResource.smali
-    private static final String RESOURCE_DESCRIPTOR_BASE = "gis";  // 6.2.1 h8n, 6.2.0 x7n
+    private static final String RESOURCE_DESCRIPTOR_BASE = "pms";  // 6.3.0 gis, 6.2.1 h8n
 
     private static final String ROW_LABEL = "PC Vibration Settings";
 
