@@ -10,7 +10,7 @@ It is built on GameHub v6.x and heavily uses the work of
 [@The412Banner](https://github.com/The412Banner) as well as others. It
 also includes my own PC-accurate controller vibration fixes.
 
-> ### 6.3.1 — built and structurally verified, pinned to PC-engine plugin 107
+> ### 6.3.1 — dual-motor confirmed on device, pinned to PC-engine plugin 107
 >
 > GameHub **6.1.1 moved the PC/Wine engine out of the APK** into a
 > separately-downloaded plugin, which splits the vibration work in two. GameScrub
@@ -25,12 +25,14 @@ also includes my own PC-accurate controller vibration fixes.
 > the host's own identity record.
 >
 > **Status of the 6.3.1 verification — read this.** Every patch site resolved
-> structurally, the build installs and runs, and all four shadow classes are
-> present. What has **not** yet been confirmed on a device is the runtime result
-> for plugin 107: the `dual-motor ACTIVE — shadowing PC engine plugin v107` log
-> line, felt dual-motor rumble, and zero heartbeat / device-perf traffic in a
-> real session. Until that is checked, treat those three as expected rather than
-> proven.
+> structurally and all four shadow classes are present. **Dual-motor rumble is
+> confirmed by hand on device with plugin 107.** That also shows the shadow dex
+> loaded: dual-motor has no other path. The heartbeat and device-perf stubs ship
+> in that same dex, so they were loaded too.
+>
+> What has **not** been observed yet is the traffic itself. Nobody has checked a
+> session log for zero `heartbeat/game` POSTs and `uploadedBatches=0`. Treat the
+> privacy kills on 6.3.1 as loaded but not yet observed.
 >
 > One reason to take that caveat seriously: 6.3.1 is the first bump where a
 > **privacy** locator broke. Plugin 107 renamed the device-perf upload method and
