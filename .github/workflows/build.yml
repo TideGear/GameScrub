@@ -44,18 +44,20 @@ jobs:
           # 3 (6.1.2), 4 (6.2.0), 5 (6.2.1), 6 (6.3.0), 7 (6.3.1). An older
           # plugin is rejected outright.
           #
-          # 6.3.1's schema-7 plugin is 107 (versionName 107-7), pulled off a
-          # device and verified byte-for-byte against the host's own identity
-          # record. Do not infer this number: 6.3.0 went 104 -> 106, skipping
-          # 105, so +1 is not a rule. Read it off the device after the host
-          # downloads the replacement it demands.
+          # 6.3.1 is now on plugin 108 (versionName 108-7), pulled off a device
+          # and verified byte-for-byte against the host's own identity record.
+          # 6.3.1 shipped with 107; the host then replaced it with 108 IN PLACE,
+          # on the same base and the same schema 7, via its launch-time
+          # plugin/latest check. So the plugin can move between GameHub
+          # releases, not only with them. Do not infer the number either (6.3.0
+          # went 104 -> 106, skipping 105). Read it off the device.
           #
           # Since the runtime compat probe landed, a mismatch here is no longer
           # automatically fatal: if a newer plugin leaves the four shadowed classes
           # structurally identical, BhPluginShadow verifies that at load time and
           # shadows anyway. It still pays to keep this current, because a plugin
           # that DOES change them (as 103 -> 104 did) is correctly refused.
-          echo "plugin_tag=pcengine-plugin-107" >> "$GITHUB_OUTPUT"
+          echo "plugin_tag=pcengine-plugin-108" >> "$GITHUB_OUTPUT"
           echo "Base version: 6.3.1"
 
       - name: Download original GameHub APK

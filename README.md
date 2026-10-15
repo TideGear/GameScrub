@@ -10,7 +10,7 @@ It is built on GameHub v6.x and heavily uses the work of
 [@The412Banner](https://github.com/The412Banner) as well as others. It
 also includes my own PC-accurate controller vibration fixes.
 
-> ### 6.3.1 — everything working, pinned to PC-engine plugin 107
+> ### 6.3.1 — working, pinned to PC-engine plugin 108
 >
 > GameHub **6.1.1 moved the PC/Wine engine out of the APK** into a
 > separately-downloaded plugin, which splits the vibration work in two. GameScrub
@@ -20,11 +20,24 @@ also includes my own PC-accurate controller vibration fixes.
 >
 > **The plugin contract has bumped on every base**: `schemaVersion` 2 (6.1.1), 3
 > (6.1.2), 4 (6.2.0), 5 (6.2.1), 6 (6.3.0), **7 (6.3.1)**. The host refuses
-> anything else outright and downloads a replacement. The shadow is cut against
-> **plugin 107** (`versionName 107-7`), pulled off a device and byte-exact against
-> the host's own identity record.
+> anything else outright and downloads a replacement.
 >
-> **Verified on device:** `dual-motor ACTIVE — shadowing PC engine plugin v107`,
+> **The plugin can also update on its own.** 6.3.1 shipped with plugin 107. On
+> 2026-10-15 GameHub replaced it with **plugin 108** (`versionName 108-7`, same
+> schema 7) during a routine launch, with no GameHub update. GameScrub's runtime
+> compatibility check saw that one of the four classes it replaces no longer
+> matched and refused to load the shadow. That is the designed failure: dual-motor
+> turns off, sustained rumble keeps working. It also turns the plugin-side
+> privacy stubs off until GameScrub is rebuilt, so **if dual-motor suddenly stops
+> after weeks of working, update GameScrub.** The current build is cut against
+> plugin 108, pulled off a device and byte-exact against the host's record. All
+> three plugin scripts resolved 108 with no edits.
+>
+> **Plugin 108:** dual-motor rumble confirmed by hand on device. That shows the
+> shadow loaded, and the privacy stubs ship in the same dex. Zero heartbeat and
+> device-perf traffic has not yet been observed in a 108 session log.
+>
+> **Plugin 107 (6.3.1 as released):** `dual-motor ACTIVE — shadowing PC engine plugin v107`,
 > dual-motor rumble confirmed by hand, **zero** `heartbeat/game` traffic and
 > `uploadedBatches=0 sessionIds=[]` for the device-perf telemetry.
 >
@@ -157,7 +170,7 @@ key, so a patched plugin can be re-validated by recomputing that record.
 
 **On-device layout.** Confirmed from the app's own logs under
 `/sdcard/Android/data/com.xiaoji.egggame/files/logs/` (paths verified on both
-6.1.1/plugin 101 through 6.3.1/plugin 107):
+6.1.1/plugin 101 through 6.3.1/plugin 108):
 
 ```
 files/plugins/com.xiaoji.egggame.plugin.pcengine/base.apk        the plugin (v103, ~24.1 MB)
@@ -213,7 +226,7 @@ Wine.
 
 `BhPluginShadow` therefore gates on the installed plugin's `versionCode` (read
 from the host's own identity record) matching
-`EXPECTED_PLUGIN_VERSION_CODE` (107 for the 6.3.1-era plugin). On a mismatch it
+`EXPECTED_PLUGIN_VERSION_CODE` (108 for the current 6.3.1 plugin). On a mismatch it
 returns the dexPath unchanged:
 dual-motor turns **off**, the engine keeps working. Degraded, never broken.
 
