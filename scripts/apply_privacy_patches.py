@@ -150,7 +150,7 @@ from pathlib import Path
 # plugin host activity and the same smali layout. apktool.yml carries the
 # actual versionName, so report that and keep the probes for the *family*
 # decision (plugin-era vs base-APK-engine).
-SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1", "6.3.0", "6.3.1")
+SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1", "6.3.0", "6.3.1", "6.3.2")
 
 
 def apktool_version(root: Path):
@@ -473,6 +473,42 @@ def android_app_smali(root: Path) -> Path:
               file=sys.stderr)
         sys.exit(1)
     return p
+
+
+def app_family(root: Path):
+    """AndroidApp plus its superclass, when the superclass is app code.
+
+    On 6.3.2 AndroidApp no longer declares onCreate or the Mob/Firebase
+    bootstraps: it extends an abstract base, Lro2;, which holds them. Searching
+    AndroidApp.smali alone found nothing, and failed loudly rather than patching
+    the wrong place. Search both, and let the caller require exactly one hit.
+    """
+    app = android_app_smali(root)
+    files = [app]
+    sup = re.search(r"^\.super (L[\w$/]+;)", read(app), re.M)
+    if sup:
+        base = find_in_any_bucket(root, sup.group(1)[1:-1] + ".smali")
+        if base is not None:
+            files.append(base)
+    return files
+
+
+def find_method_in_family(root: Path, callee: str, label: str):
+    """(file, method header) of the one method across app_family() that
+    references `callee`. Dies on zero or several hits."""
+    hits = []
+    for path in app_family(root):
+        src = read(path)
+        for m in METHOD_HEADER_RE.finditer(src):
+            end = src.find("\n.end method", m.end())
+            if end >= 0 and callee in src[m.end():end]:
+                hits.append((path, m.group(0)))
+    if len(hits) != 1:
+        die(f"{label}: expected one method in the Application family "
+            f"(AndroidApp + superclass) referencing {callee}, found {len(hits)}: "
+            f"{[(str(p.name), h.strip()[:70]) for p, h in hits]}")
+    print(f"    {label}: {hits[0][0].name} {hits[0][1].strip()[:70]}")
+    return hits[0]
 
 
 VERSION_PROBES = {"6.1.1": (ANDROID_APP_REL, PLUGIN_HOST_REL)}
@@ -1173,16 +1209,15 @@ def patch_mob_bytecode(root: Path) -> None:
     # AndroidApp's Mob bootstrap — c() on 6.1.1, b() on 6.1.2, b() on 6.0.9,
     # BaseAndroidApp.a() on 6.0.4. Located by the SDK call it makes rather than
     # by the letter, since both invokes we strip live in the same method.
-    mob_bootstrap = locate_method_containing(
-        android_app_smali(root),
-        "Lcom/mob/MobSDK;->submitPolicyGrantResult(Z)V",
-        "Mob bootstrap",
-    )
+    # On 6.3.2 the bootstrap lives in AndroidApp's superclass, so search the
+    # whole Application family and remember which file it was found in.
+    mob_path, mob_bootstrap = find_method_in_family(
+        root, "Lcom/mob/MobSDK;->submitPolicyGrantResult(Z)V", "Mob bootstrap")
 
     # First policy-grant invoke. The `const/4 v2, 0x1` that sets up the call's
     # arg stays — later code in the method uses it too.
     remove_invoke_in_method(
-        android_app_smali(root),
+        mob_path,
         mob_bootstrap,
         "Lcom/mob/MobSDK;->submitPolicyGrantResult(Z)V",
         "strip MobSDK.submitPolicyGrantResult",
@@ -1193,7 +1228,7 @@ def patch_mob_bytecode(root: Path) -> None:
     # move-result, and strictly interior (the try-boundary labels are not
     # adjacent), so removal is label-safe.
     remove_invoke_in_method(
-        android_app_smali(root),
+        mob_path,
         mob_bootstrap,
         "Lcom/mob/pushsdk/MobPush;->addPushReceiverInMain",
         "strip MobPush.addPushReceiverInMain",
@@ -1214,7 +1249,8 @@ def patch_mob_bytecode(root: Path) -> None:
         "Lcom/mob/MobSDK;->submitPolicyGrantResult(Z)V",
         None,
         "Mob push-config helper",
-        exclude=("com/mob/", "cn/fly/", "com/xiaoji/egggame/AndroidApp.smali"),
+        exclude=("com/mob/", "cn/fly/")
+        + tuple(f.relative_to(root).as_posix() for f in app_family(root)),
     )
     remove_invoke_in_method(
         helper,
@@ -1248,17 +1284,17 @@ def patch_firebase_autoinit(root: Path) -> None:
     from the unique "firebase_data_collection_default_enabled" string literal in
     the same method, so the R8 letter is read out of the code rather than
     hardcoded — the literal is the SDK's own preference key and is stable."""
-    p = android_app_smali(root)
-    src = read(p)
     # The bootstrap method's own name is an R8 letter that moves every release
     # (6.0.9 a(), 6.1.1 b(), 6.1.2 a() — and 6.1.2's b() is the *Mob* bootstrap,
     # so pinning a letter here risks patching the wrong method rather than
-    # failing). Locate it by the SDK preference key it writes.
-    header = locate_method_containing(
-        p,
+    # failing). Locate it by the SDK preference key it writes, searching the
+    # Application family because 6.3.2 moved it into AndroidApp's superclass.
+    p, header = find_method_in_family(
+        root,
         '"firebase_data_collection_default_enabled"',
         "Firebase bootstrap",
     )
+    src = read(p)
     start = src.index(header)
     end = src.find("\n.end method", start)
     body = src[start:end]

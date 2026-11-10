@@ -143,20 +143,20 @@ public final class BhVjoyImporter {
 
     // === App-owned R8 letters (re-derive every base bump; see class doc) ===
     /** Merged suspend-lambda class holding the VJoy save coroutine. */
-    private static final String SAVE_BLOCK_CLASS = "p4v";   // 6.3.0 a3v, 6.2.1 oto
+    private static final String SAVE_BLOCK_CLASS = "a0w";   // 6.3.1 p4v, 6.3.0 a3v
     /**
      * Which merged case inside SAVE_BLOCK_CLASS is the save coroutine.
      * This is NOT tied to the class letter: it stayed 0x14 from 6.1.1 through
      * 6.1.2 and then moved to 0x15 in 6.2.0. Re-read it from the call site.
      */
-    private static final int    SAVE_BLOCK_CASE  = 0x18;   // 0x14 on 6.1.1/6.1.2, 0x15 on 6.2.0/6.2.1, 0x17 on 6.3.0
+    private static final int    SAVE_BLOCK_CASE  = 0x1d;   // 0x14 on 6.1.1/6.1.2, 0x15 on 6.2.0/6.2.1, 0x17 on 6.3.0, 0x18 on 6.3.1
     /** The VJoyLayout data class (6.0.9: an FQN; 6.1.1+: obfuscated). */
-    private static final String VJOY_LAYOUT_CLASS = "b700";  // 6.3.0 o100, 6.2.1 fnt
+    private static final String VJOY_LAYOUT_CLASS = "w120";  // 6.3.1 b700, 6.3.0 o100
     /** Holder of the host's layout Json; static field VJOY_JSON_FIELD. */
-    private static final String VJOY_JSON_HOLDER  = "rb00";  // 6.3.0 e600, 6.2.1 prt
+    private static final String VJOY_JSON_HOLDER  = "t620";  // 6.3.1 rb00, 6.3.0 e600
     private static final String VJOY_JSON_FIELD   = "a";
     /** Same Json one hop upstream, used if the primary anchor moves. */
-    private static final String VJOY_JSON_HOLDER_ALT = "nb00"; // 6.3.0 a600, 6.2.1 lrt
+    private static final String VJOY_JSON_HOLDER_ALT = "l620"; // 6.3.1 nb00, 6.3.0 a600
     private static final String VJOY_JSON_FIELD_ALT  = "b";
 
     // === Kept host / library FQNs ===

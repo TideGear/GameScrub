@@ -10,7 +10,7 @@ It is built on GameHub v6.x and heavily uses the work of
 [@The412Banner](https://github.com/The412Banner) as well as others. It
 also includes my own PC-accurate controller vibration fixes.
 
-> ### 6.3.1 — working, pinned to PC-engine plugin 108
+> ### 6.3.2 — dual-motor working on plugin 109; update-badge sweep OFF
 >
 > GameHub **6.1.1 moved the PC/Wine engine out of the APK** into a
 > separately-downloaded plugin, which splits the vibration work in two. GameScrub
@@ -19,8 +19,30 @@ also includes my own PC-accurate controller vibration fixes.
 > [PC engine plugin](#pc-engine-plugin-611).
 >
 > **The plugin contract has bumped on every base**: `schemaVersion` 2 (6.1.1), 3
-> (6.1.2), 4 (6.2.0), 5 (6.2.1), 6 (6.3.0), **7 (6.3.1)**. The host refuses
-> anything else outright and downloads a replacement.
+> (6.1.2), 4 (6.2.0), 5 (6.2.1), 6 (6.3.0), 7 (6.3.1), **8 (6.3.2)**. The host
+> refuses anything else outright and downloads a replacement.
+>
+> **What works on 6.3.2:** dual-motor rumble (confirmed on device with plugin 109:
+> `dual-motor ACTIVE — shadowing PC engine plugin v109`), the sustained-rumble
+> winebus patch, the menu rows, VJoy import/export, and the base-APK and plugin-side
+> privacy stubs.
+>
+> **What is off on 6.3.2:** the background **Steam update-badge sweep**. In 6.3.2
+> the per-app update check moved: its constructor now takes the Steam repository as
+> a parameter, and that repository comes from DI with no static accessor. GameScrub
+> re-anchors that check by reflection, and the old anchor now names an unrelated
+> class, so the sweep is disabled rather than risk running the wrong code. It logs
+> `update-badge sweep disabled on this GameHub base` once at start-up. The game
+> detail update dot still works through GameHub's own check; only GameScrub's
+> proactive sweep is missing. Re-enabling it needs a repository-free per-app check
+> or a DI lookup, not a letter bump.
+>
+> **Verification status.** The plugin-side privacy stubs (heartbeat, device-perf
+> telemetry) ship in the same shadow and are confirmed loaded, but zero
+> `heartbeat/game` traffic and `uploadedBatches=0` have **not yet been observed** on
+> 6.3.2 in a real game session.
+>
+> ### Earlier: 6.3.1 — working, pinned to PC-engine plugin 108
 >
 > **The plugin can also update on its own.** 6.3.1 shipped with plugin 107. On
 > 2026-10-15 GameHub replaced it with **plugin 108** (`versionName 108-7`, same
@@ -170,7 +192,7 @@ key, so a patched plugin can be re-validated by recomputing that record.
 
 **On-device layout.** Confirmed from the app's own logs under
 `/sdcard/Android/data/com.xiaoji.egggame/files/logs/` (paths verified on both
-6.1.1/plugin 101 through 6.3.1/plugin 108):
+6.1.1/plugin 101 through 6.3.2/plugin 109):
 
 ```
 files/plugins/com.xiaoji.egggame.plugin.pcengine/base.apk        the plugin (v103, ~24.1 MB)
@@ -226,7 +248,7 @@ Wine.
 
 `BhPluginShadow` therefore gates on the installed plugin's `versionCode` (read
 from the host's own identity record) matching
-`EXPECTED_PLUGIN_VERSION_CODE` (108 for the current 6.3.1 plugin). On a mismatch it
+`EXPECTED_PLUGIN_VERSION_CODE` (109 for the current 6.3.2 plugin). On a mismatch it
 returns the dexPath unchanged:
 dual-motor turns **off**, the engine keeps working. Degraded, never broken.
 
@@ -541,11 +563,11 @@ if any anchor is missing or non-unique.
 ## Build
 
 CI workflow: `.github/workflows/build.yml` — triggers on `workflow_dispatch`
-or push of a `v*-6.3.1*` tag.
+or push of a `v*-6.3.2*` tag.
 
 One-time setup: upload the original GameHub APK as an asset on a release
-tagged `base-apk-6.3.1` in this repo (e.g.
-`GameHub_6.3.1_0aca596ab937fcb1449dbb7d5700db83.apk`). The workflow
+tagged `base-apk-6.3.2` in this repo (e.g.
+`GameHub_6.3.2_b8cc9d9f2bdfbc5eaf91799a5ea69c10.apk`). The workflow
 `gh release download`s from there.
 
 `scripts/apply_vibration_patches.py` **is** run on 6.1.1, but does less than it

@@ -137,7 +137,15 @@ public final class BhSteamUpdateChecker {
     // (Lvi0;->j(IZLContinuationImpl;) on both 6.1.1 and 6.1.2) and that the
     // block calls two letter-methods mirroring 6.1.1's Ljao;->x + Lm43;->o
     // (6.1.2: Lqao;->x + Ll43;->o).
-    private static final String CHECK_BLOCK_CLASS      = "fzd";   // 6.3.0 uwd, 6.2.1 kna
+    // null = the update-badge sweep is DISABLED on this base. On 6.3.2 the
+    // per-app check block moved: its constructor now takes the Steam repository
+    // as a parameter (Lwby;IZContinuation, class iay), which comes from DI and
+    // has no static accessor, so the (int, Continuation, boolean) shape this
+    // class builds no longer exists. The letter that used to be here ("fzd",
+    // 6.3.0/6.2.1 uwd/kna) now names an unrelated focus-router class on 6.3.2,
+    // so it must not be reused. start() checks for null and returns early.
+    // Re-anchor on the next base that exposes a repo-free per-app check.
+    private static final String CHECK_BLOCK_CLASS      = null;
     // The block passes this flag STRAIGHT THROUGH (no `xor 1` as on 6.0.9's
     // wke) — re-verified on 6.1.2 at the Lvi0;->j construction site.
     // In Lwvo;->w it selects the throttled variant: TRUE = respect the host's
@@ -198,6 +206,11 @@ public final class BhSteamUpdateChecker {
             // the game-launch window, doing reflection and Koin lookups that
             // could not possibly produce a result. Main process only.
             if (!isMainProcess(ctx)) return;
+            if (CHECK_BLOCK_CLASS == null) {
+                Log.w(TAG, "update-badge sweep disabled on this GameHub base: "
+                        + "the per-app check block moved (see CHECK_BLOCK_CLASS)");
+                return;
+            }
             if (!STARTED.compareAndSet(false, true)) return;
             BhSteamUpdateChecker self = new BhSteamUpdateChecker(ctx);
             INSTANCE = self;

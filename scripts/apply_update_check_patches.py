@@ -57,7 +57,7 @@ from pathlib import Path
 # plugin host activity and the same smali layout. apktool.yml carries the
 # actual versionName, so report that and keep the probes for the *family*
 # decision (plugin-era vs base-APK-engine).
-SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1", "6.3.0", "6.3.1")
+SUPPORTED_BASES = ("6.1.1", "6.1.2", "6.2.0", "6.2.1", "6.3.0", "6.3.1", "6.3.2")
 
 
 def apktool_version(root: Path):
@@ -125,6 +125,36 @@ def android_app_smali(root: Path) -> Path:
     return p
 
 
+def app_oncreate_smali(root: Path) -> Path:
+    """The file that declares Application.onCreate()V: AndroidApp itself on the
+    older bases, or its superclass on 6.3.2+, where AndroidApp extends an
+    abstract base (Lro2;) that owns onCreate and the instance stores. Exactly
+    one of the two must declare it, or we fail rather than guess."""
+    app = android_app_smali(root)
+    cands = [app]
+    sup = re.search(r"^\.super (L[\w$/]+;)", app.read_text(encoding="utf-8",
+                                                          errors="replace"), re.M)
+    if sup:
+        base = find_in_any_bucket(root, sup.group(1)[1:-1] + ".smali")
+        if base is not None:
+            cands.append(base)
+    owners = [c for c in cands if re.search(
+        r"^\.method public(?: final)? onCreate\(\)V",
+        c.read_text(encoding="utf-8", errors="replace"), re.M)]
+    if len(owners) != 1:
+        print(f"ERROR: expected exactly one of {[c.name for c in cands]} to "
+              f"declare onCreate()V, found {[c.name for c in owners]}.",
+              file=sys.stderr)
+        sys.exit(1)
+    return owners[0]
+
+
+def smali_type(root: Path, p: Path) -> str:
+    """Lcom/…/Name; for a smali file under any smali* bucket."""
+    rel = p.relative_to(root).as_posix()
+    return "L" + rel.split("/", 1)[1][:-len(".smali")] + ";"
+
+
 
 # ---------------------------------------------------------------------------
 # Version detection (mirrors apply_menu_patches.py)
@@ -177,14 +207,21 @@ def start_call(reg: str) -> str:
 
 
 def patch_app_start(root: Path) -> None:
-    p = android_app_smali(root)
+    p = app_oncreate_smali(root)
     src = read(p)
+    # The instance is stored as whatever type declares onCreate: AndroidApp on
+    # older bases, Lro2; on 6.3.2. Anchor on that type, not a hardcoded name.
+    stored_type = smali_type(root, p)
+    print(f"    Application onCreate declared in {p.name} (stores as {stored_type})")
 
     if "Lcom/xj/winemu/update/BhSteamUpdateChecker;->start(" in src:
         print("OK: BhSteamUpdateChecker.start already injected")
         return
 
-    hits = list(ONCREATE_ANCHOR_RE.finditer(src))
+    anchor = re.compile(
+        r"[ \t]*sput-object (v\d+), L[\w$/]+;->\w+:"
+        + re.escape(stored_type) + r"\n")
+    hits = list(anchor.finditer(src))
     if not hits:
         print(
             "ERROR: no static store of the AndroidApp instance found in "
