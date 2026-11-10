@@ -37,10 +37,19 @@ also includes my own PC-accurate controller vibration fixes.
 > proactive sweep is missing. Re-enabling it needs a repository-free per-app check
 > or a DI lookup, not a letter bump.
 >
-> **Verification status.** The plugin-side privacy stubs (heartbeat, device-perf
-> telemetry) ship in the same shadow and are confirmed loaded, but zero
-> `heartbeat/game` traffic and `uploadedBatches=0` have **not yet been observed** on
-> 6.3.2 in a real game session.
+> **Verified on device (6.3.2 / plugin 109).** The plugin-side privacy stubs
+> (heartbeat, device-perf telemetry) ship in the same shadow, and a real game session
+> confirmed them:
+>
+> | | unshadowed (21:36–21:37) | shadowed (21:40–21:44) |
+> |---|---|---|
+> | `heartbeat/game` requests | 2 (21:36:41, 21:37:11) | **0** |
+> | `statistic-gamehub-api` events | 0 | **0** |
+> | final perf flush | not reached | `uploadedBatches=0 sessionIds=[]` |
+>
+> The shadowed sessions were not idle: the playtime tracker ran and the perf reporter
+> captured samples. The unshadowed sessions never flushed, so the perf-upload contrast
+> for 6.3.2 comes from the 6.3.1 A/B above, not this one.
 >
 > ### Earlier: 6.3.1 — working, pinned to PC-engine plugin 108
 >
